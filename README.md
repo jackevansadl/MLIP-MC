@@ -1,2 +1,2 @@
 # MLIP-MC
-ASE framework for Monte Carlo simulations with machine learned interatomic potentials
+ASE framework for Monte Carlo simulations with universal Machine-Learned Interatomic Potentials (MLIP):
