@@ -1,0 +1,81 @@
+# --- macOS System Files (The "Junk" Files) ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Thumbnails
+._*
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# --- Python ---
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+# Common names for virtualenvs
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# --- Unit Test / Coverage ---
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints
+
+# --- IDE / Editor Settings (Optional but Recommended) ---
+# VS Code
+.vscode/
+# JetBrains (PyCharm)
+.idea/
+
+# --- Environment Variables (Crucial for Security) ---
+# Never commit secrets or API keys!
+.env
+.env.local
+.env.*.local
+
+
+# model and test outputs for development
+tests/uma-s-1p1.pt
+results/
