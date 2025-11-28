@@ -391,7 +391,7 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
                 results = json.load(f)
             
             uptake_data = results['uptake'][n_equilibration_steps:]
-            energy_data = results['adsorption_energy'][n_equilibration_steps:]
+            energy_data = results['interaction_energy'][n_equilibration_steps:]
             
             avg_uptake = np.mean(uptake_data)
             std_uptake = np.std(uptake_data)
