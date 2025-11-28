@@ -184,11 +184,12 @@ class MLP_GCMC:
         
         print("  └" + "─" * 66 + "┘\n")
 
-    def _save_results_json(self, uptake, adsorption_energy):
+    def _save_results_json(self, uptake, interaction_energy, total_energy):
         """Saves uptake and energy data to a JSON file."""
         results_data = {
             'uptake': uptake,
-            'adsorption_energy': adsorption_energy
+            'interaction_energy': interaction_energy,
+            'total_energy' : total_energy
         }
         filename = os.path.join(self.output_dir, f"results_{self.P/bar:.5f}bar.json")
         with open(filename, 'w') as f:
@@ -229,7 +230,8 @@ class MLP_GCMC:
         print(f'framework E: {framework_E}, adsorbate_E: {adsorbate_E}')
 
         uptake = []
-        adsorption_energy = []
+        interaction_energy = []
+        total_energy = []
         for iteration in range(N):
             switch = np.random.rand()
             if switch < 0.25:
@@ -325,7 +327,8 @@ class MLP_GCMC:
                         self.moves['rotation']['accepted'] += 1
 
             uptake.append(self.Z_ads)
-            adsorption_energy.append(interaction_E)
+            interaction_energy.append(interaction_E)
+            total_energy.append(e)
 
             # if iteration % 10000 == 0:
             #     write('results/snapshot_%.5fbar_iteration_%d.xyz'%(self.P/bar, iteration), atoms)
@@ -342,5 +345,5 @@ class MLP_GCMC:
             traj_file = os.path.join(self.output_dir, f'traj_{self.P/bar:.5f}bar.xyz')
             write(traj_file, atoms_for_writing, append=True)
 
-        self._save_results_json(uptake, adsorption_energy)
+        self._save_results_json(uptake, interaction_energy, total_energy)
         self._print_statistics()

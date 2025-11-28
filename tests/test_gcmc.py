@@ -212,7 +212,8 @@ class TestMLPGCMC:
         
         uptake = [1, 2, 3]
         adsorption_energy = [0.1, 0.2, 0.3]
-        gcmc._save_results_json(uptake, adsorption_energy)
+        total_energy = [-0.1, -0.2, -0.3]
+        gcmc._save_results_json(uptake, adsorption_energy, total_energy)
         
         assert os.path.exists(f"results/results_{1.0:.5f}bar.json")
     
