@@ -123,7 +123,7 @@ If you use this code in your research, please cite:
 ```bibtex
 @software{mlip_mc,
   title = {MLIP-MC: Monte Carlo Simulations with Machine-Learned Interatomic Potentials},
-  author = {Evans, Jack},
+  author = {Edwards, Connor W. and Yang, Fengxu and Stracke, Konstantin and Evans, Jack D.},
   year = {2025},
   license = {MIT}
 }
