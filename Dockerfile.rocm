@@ -4,10 +4,10 @@ FROM rocm/dev-ubuntu-24.04:6.4.4-complete
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Upgrade pip to the latest version
-RUN pip install --upgrade pip
+RUN pip install --upgrade pip --break-system-packages --ignore-installed
 
 # Install PyTorch, TorchVision, and TorchAudio for ROCm 6.4
-RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4
+RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4 --break-system-packages
 
 # Set the working directory
 WORKDIR /app
@@ -16,7 +16,7 @@ WORKDIR /app
 COPY . /app
 
 # Install the current project
-RUN pip install .
+RUN pip install . --break-system-packages
 
 # Default command to keep the container running or drop into a shell
 CMD ["/bin/bash"]
