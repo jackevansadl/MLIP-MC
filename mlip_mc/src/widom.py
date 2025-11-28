@@ -1,13 +1,20 @@
 import os
-import numpy as np
 import json
+import numpy as np
 
 from ase import Atoms
 from ase.io import read, write
 from ase import units as ase_units
-from utilities import _random_rotation, random_position, vdw_overlap
+from .utilities import _random_rotation, random_position, vdw_overlap
 
-class MLP_Widom():
+
+class MLP_Widom:
+    """
+    Widom insertion method for calculating Henry's constants and adsorption energies.
+    
+    This class performs Widom insertion trials to estimate the excess chemical
+    potential and related thermodynamic properties.
+    """
     def __init__(self, model, atoms_frame, atoms_ads, T, device, vdw_radii):
         self.model = model
         self.atoms_frame = atoms_frame
@@ -15,7 +22,7 @@ class MLP_Widom():
         self.atoms_ads = atoms_ads
         self.n_ads = len(self.atoms_ads)
         self.cell = np.array(self.atoms_frame.get_cell())
-        self.V = np.linalg.det(self.cell) # Volume in A^3
+        self.V = np.linalg.det(self.cell)  # Volume in A^3
         self.T = T 
         self.device = device
         self.boltzmann = ase_units.kB
@@ -28,7 +35,7 @@ class MLP_Widom():
             
         self.stats = {
             'attempts': 0,
-            'valid_insertions': 0, # No VDW overlap
+            'valid_insertions': 0,  # No VDW overlap
             'vdw_overlaps': 0
         }
 
@@ -50,7 +57,8 @@ class MLP_Widom():
             
             # Weighted average energy (using Boltzmann factors as weights)
             # <U> = < U * exp(-beta * U) > / < exp(-beta * U) >
-            weighted_E = np.sum(np.array(e_adsorptions) * boltzmann_factors) / np.sum(boltzmann_factors)
+            weighted_E = (np.sum(np.array(e_adsorptions) * boltzmann_factors) /
+                          np.sum(boltzmann_factors))
             
             print(f"Average Boltzmann Factor: {avg_bf:.5e}")
             print(f"Calculated Henry's Constant (approx): {henry_constant:.5e}")
@@ -131,9 +139,8 @@ class MLP_Widom():
             # Since Widom only ever has 1 adsorbate at index 0 (relative to adsorbates), we pass 0
             if vdw_overlap(atoms_trial, self.vdw, self.n_frame, self.n_ads, 0):
                 self.stats['vdw_overlaps'] += 1
-                # Overlap = Infinite energy = 0 probability. We usually don't store the energy 
-                # for pure statistics unless doing specific void fraction calc, but we skip expensive ML calc.
-                # print(f"Iter {iteration}: VDW Overlap")
+                # Overlap = Infinite energy = 0 probability.
+                # Skip expensive ML calculation for overlapping configurations
                 continue
             else:
                 self.stats['valid_insertions'] += 1
@@ -145,13 +152,9 @@ class MLP_Widom():
                 # Calculate Interaction Energy (Delta E)
                 # E_int = E_total - E_framework - E_adsorbate
                 interaction_E = e_trial - framework_E - adsorbate_E
-                
                 e_adsorptions.append(interaction_E)
                 
-                # for debugging
-                #print(f"Iter {iteration}: Valid. E_int: {interaction_E:.4f} eV")
-
-                # Save Trajectory of valid insertions
+                # Save trajectory of valid insertions
                 # Rebuild atoms to ensure clean write
                 atoms_for_writing = Atoms(
                     numbers=atoms_trial.numbers, 

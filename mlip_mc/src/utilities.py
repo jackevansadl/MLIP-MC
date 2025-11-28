@@ -5,7 +5,24 @@ from pathlib import Path
 boltzmann = kB # eV/kelvin
 planck = _hbar  # eV*s
 amu = _amu    # kg
-def _random_rotation(pos, circlefrac = 1.0):
+def _random_rotation(pos, circlefrac=1.0):
+    """
+    Apply a random rotation to a set of positions.
+    
+    Parameters
+    ----------
+    pos : array_like
+        Array of atomic positions (N, 3)
+    circlefrac : float, optional
+        Fraction of full rotation circle (default: 1.0)
+        
+    Returns
+    -------
+    array_like
+        Rotated positions
+    """
+    # Ensure float dtype to avoid casting errors
+    pos = np.asarray(pos, dtype=float)
     # Translate to origin
     com = np.average(pos, axis=0)
     pos -= com
@@ -32,17 +49,54 @@ def _random_rotation(pos, circlefrac = 1.0):
     return pos + com
 
 def _random_translation(pos, rvecs):
+    pos = np.asarray(pos, dtype=float)
     pos -= np.average(pos, axis=0)
     rnd = np.random.rand(3)
     new_cos = rnd[0]*rvecs[0] + rnd[1]*rvecs[1] + rnd[2]*rvecs[2]
     return pos + new_cos
 
 def random_position(pos, rvecs):
+    """
+    Randomly rotate and translate positions within a cell.
+    
+    Parameters
+    ----------
+    pos : array_like
+        Array of atomic positions (N, 3)
+    rvecs : array_like
+        Cell vectors (3, 3)
+        
+    Returns
+    -------
+    array_like
+        Randomly positioned coordinates
+    """
     pos = _random_rotation(pos)
     pos = _random_translation(pos, rvecs)
     return pos
 
 def vdw_overlap(atoms, vdw, n_frame, n_ads, select_ads):
+    """
+    Check for van der Waals overlap between adsorbate and framework.
+    
+    Parameters
+    ----------
+    atoms : ase.Atoms
+        Atomic structure
+    vdw : dict
+        Dictionary mapping atomic numbers to VDW radii
+    n_frame : int
+        Number of framework atoms
+    n_ads : int
+        Number of atoms per adsorbate molecule
+    select_ads : int
+        Index of adsorbate to check
+        
+    Returns
+    -------
+    bool
+        True if overlap detected, False otherwise
+    """
     nat = len(atoms)
     pos, numbers = atoms.get_positions(), atoms.get_atomic_numbers()
     for i_ads in range(n_frame + n_ads*select_ads, n_frame + n_ads*(select_ads+1)):
@@ -55,7 +109,10 @@ def vdw_overlap(atoms, vdw, n_frame, n_ads, select_ads):
     return False
 
 
-class EOS(object):
+class EOS:
+    """
+    Base class for equations of state.
+    """
     def __init__(self, mass=0.0):
         self.mass = mass
 
@@ -114,10 +171,11 @@ class EOS(object):
             rhoref = self.calculate_rho(T, Pref)
             Zref = Pref/rhoref/boltzmann/T
             # Z close to 1.0 means ideal gas behavior
-            if np.abs(Zref-1.0)>deviation:
+            if np.abs(Zref - 1.0) > deviation:
                 Pref /= 2.0
-            else: break
-        if np.abs(Zref-1.0)>deviation:
+            else:
+                break
+        if np.abs(Zref - 1.0) > deviation:
             raise ValueError("Failed to find pressure where the fluidum is ideal-gas like, check input parameters")
         return Pref
 
@@ -125,7 +183,12 @@ class EOS(object):
 
 
 class PREOS(EOS):
-    """The Peng-Robinson equation of state"""
+    """
+    The Peng-Robinson equation of state.
+    
+    Implements the Peng-Robinson cubic equation of state for calculating
+    thermodynamic properties of fluids.
+    """
     def __init__(self, Tc, Pc, omega, mass=0.0, phase="vapour"):
         """
            The Peng-Robinson EOS gives a relation between pressure, volume, and
@@ -165,19 +228,19 @@ class PREOS(EOS):
            'critical_acentric.csv'
         """
         # Read the data file containing parameters for a number of selected compounds
-        module_dir = Path(__file__).parent
-        fn = module_dir / 'critical_acentric.csv'
-#        fn = pkg_resources.resource_filename(yaff.__name__, 'data/critical_acentric.csv')
+        # File is in data/ directory within the package (one level up from src/)
+        module_dir = Path(__file__).parent.parent
+        fn = module_dir / 'data' / 'critical_acentric.csv'
         dtype=[('compound','S20'),('mass','f8'),('Tc','f8'),('Pc','f8'),('omega','f8'),]
         data = np.genfromtxt(fn, dtype=dtype, delimiter=',')
         # Select requested compound
-        if not compound.encode('utf-8') in data['compound']:
-            raise ValueError("Could not find data for %s in file %s"%(compound,fn))
-        index = np.where( compound.encode('utf-8') == data['compound'] )[0]
+        if compound.encode('utf-8') not in data['compound']:
+            raise ValueError(f"Could not find data for {compound} in file {fn}")
+        index = np.where(compound.encode('utf-8') == data['compound'])[0]
         assert index.shape[0]==1
-        mass = data['mass'][index[0]] # amu
-        Tc = data['Tc'][index[0]] # K
-        Pc = data['Pc'][index[0]]*1e6*Pascal # eV/A3
+        mass = data['mass'][index[0]]  # amu
+        Tc = data['Tc'][index[0]]  # K
+        Pc = data['Pc'][index[0]] * 1e6 * Pascal  # eV/A3
         omega = data['omega'][index[0]]
         return cls(Tc, Pc, omega, mass=mass)
 
@@ -190,7 +253,7 @@ class PREOS(EOS):
            P
                 Pressure
         """
-        self.Tr = T / self.Tc  # reduced temperature
+        self.Tr = T / self.Tc  # Reduced temperature
         self.alpha = (1 + self.kappa * (1 - np.sqrt(self.Tr)))**2
         self.A = self.a * self.alpha * P / T**2
         self.B = self.b * P / T
@@ -227,13 +290,14 @@ class PREOS(EOS):
             x1 = -2.0*np.sqrt(Q)*np.cos(theta/3)-a/3
             x2 = -2.0*np.sqrt(Q)*np.cos((theta+2*np.pi)/3)-a/3
             x3 = -2.0*np.sqrt(Q)*np.cos((theta-2*np.pi)/3)-a/3
-            solutions = np.array([x1,x2,x3])
-            solutions = solutions[solutions>0.0]
-            if self.phase=='vapour':
+            solutions = np.array([x1, x2, x3])
+            solutions = solutions[solutions > 0.0]
+            if self.phase == 'vapour':
                 Z = np.amax(solutions)
-            elif self.phase=='liquid':
+            elif self.phase == 'liquid':
                 Z = np.amin(solutions)
-            else: raise NotImplementedError
+            else:
+                raise NotImplementedError
         return Z
 
     def calculate_rho(self, T, P):
@@ -250,7 +314,7 @@ class PREOS(EOS):
         """
         self.set_conditions(T, P)
         Z = self.polynomial_roots()
-        return P/Z/boltzmann/T
+        return P / Z / boltzmann / T
 
     def calculate_mu_ex(self, T, P):
         """
@@ -275,8 +339,8 @@ class PREOS(EOS):
         # Add contributions to chemical potential at requested pressure
         mu = Z - 1 - np.log(Z - self.B) - self.A / np.sqrt(8) / self.B * np.log(
                     (Z + (1 + np.sqrt(2)) * self.B) / (Z + (1 - np.sqrt(2)) * self.B))
-        mu += np.log(P/Pref)
-        mu *= T*boltzmann
+        mu += np.log(P / Pref)
+        mu *= T * boltzmann
         return mu, Pref
 
 
