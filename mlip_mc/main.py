@@ -278,7 +278,7 @@ def _resolve_model_spec(model_spec: str):
 
 def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibration_steps, 
                         n_production_steps, n_total_steps, gpu_id, result_queue, 
-                        adsorbate_name=None, output_dir='results'):
+                        adsorbate_name=None, output_dir='results', save_interval=1000, restart=False):
     """
     Run GCMC simulation for a single pressure point on a specific GPU.
     
@@ -306,6 +306,10 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
         Queue to return results
     output_dir : str, optional
         Directory to save results (default: 'results')
+    save_interval : int, optional
+        Interval for saving restart files (default: 1000)
+    restart : bool, optional
+        Whether to enable restart functionality (default: False)
     """
     try:
         # 1. Set Environment Variables for GPU Isolation
@@ -351,10 +355,15 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
-        # Clean trajectory file if it exists
+        # Clean trajectory file if it exists AND we are not restarting
         traj_file = os.path.join(output_dir, f'traj_{P/bar:.5f}bar.xyz')
-        if os.path.exists(traj_file):
+        if os.path.exists(traj_file) and not restart:
             os.remove(traj_file)
+
+        # Determine restart prefix
+        restart_prefix = None
+        if restart:
+            restart_prefix = os.path.join(output_dir, f"restart_{P/bar:.5f}bar")
 
         # Run GCMC Simulation
         gcmc = MLP_GCMC(
@@ -367,7 +376,9 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
             device=device,
             vdw_radii=vdw_radii,
             debug=False,
-            output_dir=output_dir
+            output_dir=output_dir,
+            restart_prefix=restart_prefix,
+            save_interval=save_interval
         )
         
         print(f"  [{device_str}] Running {n_total_steps} steps...")
@@ -430,7 +441,9 @@ def run_gcmc(
     output_dir='results',
     plot_isotherm=True,
     adsorbate_label=None,
-    hf_token=None
+    hf_token=None,
+    save_interval=1000,
+    restart=False
 ):
     """
     Run GCMC isotherm simulation for gas adsorption in a porous material.
@@ -466,6 +479,10 @@ def run_gcmc(
         Label for adsorbate in plot title (default: inferred from file/molecule name)
     hf_token : str, optional
         Hugging Face authentication token. If None, uses cached token or prompts for login
+    save_interval : int, optional
+        Interval for saving restart files (default: 1000)
+    restart : bool, optional
+        Whether to enable restart functionality (default: False)
     
     Returns
     -------
@@ -629,7 +646,7 @@ def run_gcmc(
         p = Process(target=run_single_pressure, args=(
             P_bar, temperature, model_path, atoms_frame, atoms_ads,
             n_equilibration_steps, n_production_steps, n_total_steps,
-            gpu_id, result_queue, adsorbate_name, output_dir
+            gpu_id, result_queue, adsorbate_name, output_dir, save_interval, restart
         ))
         processes.append(p)
         p.start()
@@ -802,6 +819,10 @@ Examples:
                         help='Output directory for results (default: results)')
     parser.add_argument('--no-plot', action='store_true',
                         help='Skip generating isotherm plot')
+    parser.add_argument('--save-interval', type=int, default=1000,
+                        help='Interval for saving restart files (default: 1000)')
+    parser.add_argument('--restart', action='store_true',
+                        help='Enable restart functionality. Will look for restart files in output directory and resume if found.')
     
     return parser.parse_args()
 
@@ -844,10 +865,11 @@ def main():
             n_equilibration_steps=args.n_equil,
             n_production_steps=args.n_prod,
             model_path=args.model,
-            adsorbate_name=None,  # Will be automatically determined from adsorbate_path or adsorbate_molecule
             output_dir=args.output_dir,
             plot_isotherm=not args.no_plot,
-            hf_token=args.hf_token
+            hf_token=args.hf_token,
+            save_interval=args.save_interval,
+            restart=args.restart
         )
     except Exception as e:
         print(f"\nERROR: {e}")

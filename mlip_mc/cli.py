@@ -70,6 +70,10 @@ Examples:
                         help='Output directory for results (default: results)')
     parser.add_argument('--no-plot', action='store_true',
                         help='Skip generating isotherm plot')
+    parser.add_argument('--save-interval', type=int, default=1000,
+                        help='Interval for saving restart files (default: 1000)')
+    parser.add_argument('--restart', action='store_true',
+                        help='Enable restart functionality. Will look for restart files in output directory and resume if found.')
     
     return parser.parse_args()
 
@@ -114,7 +118,9 @@ def main():
             model_path=args.model,
             output_dir=args.output_dir,
             plot_isotherm=not args.no_plot,
-            hf_token=args.hf_token
+            hf_token=args.hf_token,
+            save_interval=args.save_interval,
+            restart=args.restart
         )
     except Exception as e:
         print(f"\nERROR: {e}")
