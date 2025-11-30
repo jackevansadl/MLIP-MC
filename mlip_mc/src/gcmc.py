@@ -471,6 +471,7 @@ class MLP_GCMC:
                     acc = min(1, np.exp(-self.beta*(e_trial-e)))
                     if acc > np.random.rand():
                         atoms = atoms_trial.copy()
+                        interaction_E = e_trial - framework_E - self.Z_ads * adsorbate_E
                         e = e_trial
                         self.moves['translation']['accepted'] += 1
 
@@ -491,6 +492,7 @@ class MLP_GCMC:
                     acc = min(1, np.exp(-self.beta*(e_trial-e)))
                     if acc > np.random.rand():
                         atoms = atoms_trial.copy()
+                        interaction_E = e_trial - framework_E - self.Z_ads * adsorbate_E
                         e = e_trial
                         self.moves['rotation']['accepted'] += 1
 
