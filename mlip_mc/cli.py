@@ -5,14 +5,42 @@ Command-line interface for MLIP-MC.
 This module provides the CLI entry point for running GCMC isotherm simulations.
 """
 
-import os
 import sys
 import argparse
 import multiprocessing as mp
+import traceback
+from typing import Union, List
 from .main import run_gcmc
 
 
-def parse_arguments():
+def parse_pressures(pressure_str: str) -> Union[float, List[float]]:
+    """
+    Parse pressure string into float or list of floats.
+    
+    Parameters
+    ----------
+    pressure_str : str
+        Comma-separated list of pressures or a single number
+        
+    Returns
+    -------
+    Union[float, List[float]]
+        Single pressure value or list of pressure values
+        
+    Raises
+    ------
+    ValueError
+        If the pressure string cannot be parsed
+    """
+    parts = [p.strip() for p in pressure_str.split(',')]
+    
+    if len(parts) == 1:
+        return float(parts[0])
+    
+    return [float(p) for p in parts]
+
+
+def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='MLIP-MC: Monte Carlo Simulations with Machine-Learned Interatomic Potentials',
@@ -70,15 +98,11 @@ Examples:
                         help='Output directory for results (default: results)')
     parser.add_argument('--no-plot', action='store_true',
                         help='Skip generating isotherm plot')
-    parser.add_argument('--save-interval', type=int, default=1000,
-                        help='Interval for saving restart files (default: 1000)')
-    parser.add_argument('--restart', action='store_true',
-                        help='Enable restart functionality. Will look for restart files in output directory and resume if found.')
     
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     """Main entry point for the CLI."""
     # Use 'spawn' to ensure fresh processes for CUDA isolation
     try:
@@ -89,21 +113,18 @@ def main():
     args = parse_arguments()
     
     # Validate arguments
-    if args.adsorbate_path is None and args.adsorbate_molecule is None:
-        print("ERROR: Either --adsorbate-path or --adsorbate-molecule must be provided")
+    if not args.adsorbate_path and not args.adsorbate_molecule:
+        print("ERROR: Either --adsorbate-path or --adsorbate-molecule must be provided", 
+              file=sys.stderr)
         sys.exit(1)
     
     # Parse pressure points
     try:
-        pressure_points = [float(p.strip()) for p in args.pressures.split(',')]
-    except ValueError:
-        # Try as single number
-        try:
-            pressure_points = float(args.pressures)
-        except ValueError:
-            print(f"ERROR: Invalid pressure format: {args.pressures}")
-            print("Please provide comma-separated numbers or a single number")
-            sys.exit(1)
+        pressure_points = parse_pressures(args.pressures)
+    except ValueError as e:
+        print(f"ERROR: Invalid pressure format: {args.pressures}", file=sys.stderr)
+        print("Please provide comma-separated numbers or a single number", file=sys.stderr)
+        sys.exit(1)
     
     # Run simulation
     try:
@@ -118,13 +139,10 @@ def main():
             model_path=args.model,
             output_dir=args.output_dir,
             plot_isotherm=not args.no_plot,
-            hf_token=args.hf_token,
-            save_interval=args.save_interval,
-            restart=args.restart
+            hf_token=args.hf_token
         )
     except Exception as e:
-        print(f"\nERROR: {e}")
-        import traceback
+        print(f"\nERROR: {e}", file=sys.stderr)
         traceback.print_exc()
         sys.exit(1)
 

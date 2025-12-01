@@ -8,7 +8,10 @@ Main entry point for running GCMC isotherm simulations.
 import os
 import sys
 import json
+import shutil
+import traceback
 from pathlib import Path
+from typing import Union, List, Tuple, Dict, Any, Optional
 import numpy as np
 import multiprocessing as mp
 from multiprocessing import Process, Queue
@@ -37,7 +40,20 @@ else:
     MODEL_CACHE_ROOT = Path.home() / ".cache" / "mlip-mc"
 
 
-def download_model_from_huggingface(model_path, repo_id=DEFAULT_HF_REPO, filename=None, token=None):
+def _copy_model_to_target(downloaded_path: str, target_path: str) -> str:
+    """Copy downloaded model to target location."""
+    target_dir = Path(target_path).parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(downloaded_path, target_path)
+    return target_path
+
+
+def download_model_from_huggingface(
+    model_path: str,
+    repo_id: str = DEFAULT_HF_REPO,
+    filename: Optional[str] = None,
+    token: Optional[str] = None
+) -> str:
     """
     Download model from Hugging Face Hub if it doesn't exist locally.
     
@@ -57,13 +73,10 @@ def download_model_from_huggingface(model_path, repo_id=DEFAULT_HF_REPO, filenam
     str
         Path to the downloaded model file
     """
-    # If model already exists locally, return the path
     if os.path.exists(model_path):
         return model_path
     
-    # Set default filename if not provided
-    if filename is None:
-        filename = DEFAULT_HF_FILENAME
+    filename = filename or DEFAULT_HF_FILENAME
     
     # Always use cache directory for downloads to ensure consistent caching
     # as documented: ~/.cache/mlip-mc/<repo>/<filename>
@@ -74,30 +87,17 @@ def download_model_from_huggingface(model_path, repo_id=DEFAULT_HF_REPO, filenam
     try:
         from huggingface_hub import hf_hub_download, login
         
-        # Print statements removed - handled by caller
-        
-        # Try to download (will use cached token if available)
         try:
-            # Download to Hugging Face cache first
             downloaded_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
                 token=token,
-                local_dir=None  # Download to HF cache first
+                local_dir=None
             )
             
-            # Copy to our target location (cache directory or user-specified path)
             if downloaded_path != target_path:
-                import shutil
-                # Ensure target directory exists
-                target_dir = os.path.dirname(target_path)
-                if target_dir and not os.path.exists(target_dir):
-                    os.makedirs(target_dir, exist_ok=True)
-                # Copy to the target location
-                shutil.copy2(downloaded_path, target_path)
-                return target_path
-            else:
-                return downloaded_path
+                return _copy_model_to_target(downloaded_path, target_path)
+            return downloaded_path
             
         except Exception as e:
             # If download fails due to authentication, try to login
@@ -109,21 +109,14 @@ def download_model_from_huggingface(model_path, repo_id=DEFAULT_HF_REPO, filenam
                 print()
                 if token:
                     login(token=token)
-                    # Retry download
                     downloaded_path = hf_hub_download(
                         repo_id=repo_id,
                         filename=filename,
                         token=token,
                         local_dir=None
                     )
-                    # Copy to target location if different
                     if downloaded_path != target_path:
-                        import shutil
-                        target_dir = os.path.dirname(target_path)
-                        if target_dir and not os.path.exists(target_dir):
-                            os.makedirs(target_dir, exist_ok=True)
-                        shutil.copy2(downloaded_path, target_path)
-                        return target_path
+                        return _copy_model_to_target(downloaded_path, target_path)
                     return downloaded_path
             raise
     
@@ -230,7 +223,7 @@ def _print_table(headers, rows, width=70):
     print("└" + "─" * (total_width - 2) + "┘")
 
 
-def _resolve_model_spec(model_spec: str):
+def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str]:
     """
     Normalize the model argument into a local path plus (optional) Hugging Face filename.
 
@@ -276,9 +269,25 @@ def _resolve_model_spec(model_spec: str):
     return model_spec, DEFAULT_HF_REPO, hf_filename
 
 
-def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibration_steps, 
-                        n_production_steps, n_total_steps, gpu_id, result_queue, 
-                        adsorbate_name=None, output_dir='results', save_interval=1000, restart=False):
+def _format_device_str(gpu_id: Union[int, str]) -> str:
+    """Format device string for display."""
+    return f"GPU {gpu_id}" if isinstance(gpu_id, int) else "CPU"
+
+
+def run_single_pressure(
+    P_bar: float,
+    T: float,
+    model_path: str,
+    atoms_frame: Atoms,
+    atoms_ads: Atoms,
+    n_equilibration_steps: int,
+    n_production_steps: int,
+    n_total_steps: int,
+    gpu_id: Union[int, str],
+    result_queue: Queue,
+    adsorbate_name: Optional[str] = None,
+    output_dir: str = 'results'
+) -> None:
     """
     Run GCMC simulation for a single pressure point on a specific GPU.
     
@@ -306,10 +315,6 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
         Queue to return results
     output_dir : str, optional
         Directory to save results (default: 'results')
-    save_interval : int, optional
-        Interval for saving restart files (default: 1000)
-    restart : bool, optional
-        Whether to enable restart functionality (default: False)
     """
     try:
         # 1. Set Environment Variables for GPU Isolation
@@ -337,7 +342,7 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
         model = FAIRChemCalculator(predictor, task_name="odac")
         
         P = P_bar * bar
-        device_str = f"GPU {gpu_id}" if isinstance(gpu_id, int) else "CPU"
+        device_str = _format_device_str(gpu_id)
         print(f"  [{device_str}] Starting simulation at P = {P_bar:.2f} bar")
         
         # Calculate Fugacity using Peng-Robinson EOS
@@ -355,15 +360,14 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
-        # Clean trajectory file if it exists AND we are not restarting
+        # Clean trajectory file if it exists (will be recreated with appended data)
         traj_file = os.path.join(output_dir, f'traj_{P/bar:.5f}bar.xyz')
-        if os.path.exists(traj_file) and not restart:
+        if os.path.exists(traj_file):
             os.remove(traj_file)
 
-        # Determine restart prefix
-        restart_prefix = None
-        if restart:
-            restart_prefix = os.path.join(output_dir, f"restart_{P/bar:.5f}bar")
+        # Restart is now automatic - checkpoint directory is always used
+        # Keep restart_prefix for backward compatibility (not used anymore, but kept for API)
+        restart_prefix = os.path.join(output_dir, f"restart_{P/bar:.5f}bar")
 
         # Run GCMC Simulation
         gcmc = MLP_GCMC(
@@ -377,8 +381,9 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
             vdw_radii=vdw_radii,
             debug=False,
             output_dir=output_dir,
-            restart_prefix=restart_prefix,
-            save_interval=save_interval
+            restart_prefix=restart_prefix,  # Kept for backward compatibility (not used)
+            n_equilibration_steps=n_equilibration_steps,  # Total equilibration steps (target)
+            n_production_steps=n_production_steps  # Total production steps (target)
         )
         
         print(f"  [{device_str}] Running {n_total_steps} steps...")
@@ -397,7 +402,7 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
             std_uptake = np.std(uptake_data)
             avg_energy = np.mean([e for e in energy_data if e != 0]) if any(e != 0 for e in energy_data) else 0.0
             
-            device_str = f"GPU {gpu_id}" if isinstance(gpu_id, int) else "CPU"
+            device_str = _format_device_str(gpu_id)
             print(f"  [{device_str}] Completed P = {P_bar:.2f} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}")
             
             # Return results via queue
@@ -408,7 +413,8 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
                 'energy': avg_energy
             })
         else:
-            print(f"[GPU {gpu_id}] Warning: Results file not found: {results_file}")
+            device_str = _format_device_str(gpu_id)
+            print(f"  [{device_str}] Warning: Results file not found: {results_file}")
             result_queue.put({
                 'pressure': P_bar,
                 'uptake': None,
@@ -416,9 +422,8 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
                 'energy': None
             })
     except Exception as e:
-        device_str = f"GPU {gpu_id}" if isinstance(gpu_id, int) else "CPU"
-        print(f"  [{device_str}] ERROR in simulation at P = {P_bar:.2f} bar: {e}")
-        import traceback
+        device_str = _format_device_str(gpu_id)
+        print(f"  [{device_str}] ERROR in simulation at P = {P_bar:.2f} bar: {e}", file=sys.stderr)
         traceback.print_exc()
         result_queue.put({
             'pressure': P_bar,
@@ -429,22 +434,27 @@ def run_single_pressure(P_bar, T, model_path, atoms_frame, atoms_ads, n_equilibr
         })
 
 
+def _normalize_pressure_points(pressure_points: Union[float, List[float]]) -> List[float]:
+    """Normalize pressure points to a list of floats."""
+    if isinstance(pressure_points, (int, float)):
+        return [float(pressure_points)]
+    return [float(p) for p in pressure_points]
+
+
 def run_gcmc(
-    adsorbent_path,
-    adsorbate_path=None,
-    adsorbate_molecule=None,
-    temperature=298.0,
-    pressure_points=None,
-    n_equilibration_steps=10000,
-    n_production_steps=20000,
-    model_path="models/model.pt",
-    output_dir='results',
-    plot_isotherm=True,
-    adsorbate_label=None,
-    hf_token=None,
-    save_interval=1000,
-    restart=False
-):
+    adsorbent_path: str,
+    adsorbate_path: Optional[str] = None,
+    adsorbate_molecule: Optional[str] = None,
+    temperature: float = 298.0,
+    pressure_points: Optional[Union[float, List[float]]] = None,
+    n_equilibration_steps: int = 10000,
+    n_production_steps: int = 20000,
+    model_path: str = "models/model.pt",
+    output_dir: str = 'results',
+    plot_isotherm: bool = True,
+    adsorbate_label: Optional[str] = None,
+    hf_token: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Run GCMC isotherm simulation for gas adsorption in a porous material.
     
@@ -479,10 +489,6 @@ def run_gcmc(
         Label for adsorbate in plot title (default: inferred from file/molecule name)
     hf_token : str, optional
         Hugging Face authentication token. If None, uses cached token or prompts for login
-    save_interval : int, optional
-        Interval for saving restart files (default: 1000)
-    restart : bool, optional
-        Whether to enable restart functionality (default: False)
     
     Returns
     -------
@@ -609,10 +615,7 @@ def run_gcmc(
     if pressure_points is None:
         raise ValueError("pressure_points must be provided (float or list of floats)")
     
-    if isinstance(pressure_points, (int, float)):
-        pressure_points = [float(pressure_points)]
-    else:
-        pressure_points = [float(p) for p in pressure_points]
+    pressure_points = _normalize_pressure_points(pressure_points)
     
     _print_subsection("Simulation Parameters")
     _print_info("Temperature", f"{temperature} K")
@@ -646,12 +649,12 @@ def run_gcmc(
         p = Process(target=run_single_pressure, args=(
             P_bar, temperature, model_path, atoms_frame, atoms_ads,
             n_equilibration_steps, n_production_steps, n_total_steps,
-            gpu_id, result_queue, adsorbate_name, output_dir, save_interval, restart
+            gpu_id, result_queue, adsorbate_name, output_dir
         ))
         processes.append(p)
         p.start()
-        device_str = f"GPU {gpu_id}" if isinstance(gpu_id, int) else str(gpu_id).upper()
-        _print_info(f"Started", f"P = {P_bar:.2f} bar on {device_str}")
+        device_str = _format_device_str(gpu_id) if isinstance(gpu_id, int) else str(gpu_id).upper()
+        _print_info("Started", f"P = {P_bar:.2f} bar on {device_str}")
     
     # Wait for all processes to complete
     print(f"\n  Waiting for {len(processes)} simulation(s) to complete...")
@@ -682,7 +685,7 @@ def run_gcmc(
         else:
             _print_warning(f"No data for P = {r['pressure']:.2f} bar")
             if 'error' in r:
-                print(f"    Error: {r['error']}")
+                print(f"    Error: {r['error']}", file=sys.stderr)
     
     # 6. Plot Isotherm (if requested and we have data)
     if plot_isotherm and len(pressures) > 0:
@@ -751,13 +754,13 @@ def run_gcmc(
     if plot_isotherm and len(pressures) > 0:
         try:
             plt.show()
-        except:
+        except Exception:
             print("  (Plot display not available in non-interactive environment)")
     
     return isotherm_data
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='MLIP-MC: Run GCMC isotherm simulation for gas adsorption',
@@ -819,15 +822,38 @@ Examples:
                         help='Output directory for results (default: results)')
     parser.add_argument('--no-plot', action='store_true',
                         help='Skip generating isotherm plot')
-    parser.add_argument('--save-interval', type=int, default=1000,
-                        help='Interval for saving restart files (default: 1000)')
-    parser.add_argument('--restart', action='store_true',
-                        help='Enable restart functionality. Will look for restart files in output directory and resume if found.')
     
     return parser.parse_args()
 
 
-def main():
+def _parse_pressures(pressure_str: str) -> Union[float, List[float]]:
+    """
+    Parse pressure string into float or list of floats.
+    
+    Parameters
+    ----------
+    pressure_str : str
+        Comma-separated list of pressures or a single number
+        
+    Returns
+    -------
+    Union[float, List[float]]
+        Single pressure value or list of pressure values
+        
+    Raises
+    ------
+    ValueError
+        If the pressure string cannot be parsed
+    """
+    parts = [p.strip() for p in pressure_str.split(',')]
+    
+    if len(parts) == 1:
+        return float(parts[0])
+    
+    return [float(p) for p in parts]
+
+
+def main() -> None:
     """Main entry point for the CLI."""
     # Use 'spawn' to ensure fresh processes for CUDA isolation
     try:
@@ -838,21 +864,18 @@ def main():
     args = parse_arguments()
     
     # Validate arguments
-    if args.adsorbate_path is None and args.adsorbate_molecule is None:
-        print("ERROR: Either --adsorbate-path or --adsorbate-molecule must be provided")
+    if not args.adsorbate_path and not args.adsorbate_molecule:
+        print("ERROR: Either --adsorbate-path or --adsorbate-molecule must be provided",
+              file=sys.stderr)
         sys.exit(1)
     
     # Parse pressure points
     try:
-        pressure_points = [float(p.strip()) for p in args.pressures.split(',')]
-    except ValueError:
-        # Try as single number
-        try:
-            pressure_points = float(args.pressures)
-        except ValueError:
-            print(f"ERROR: Invalid pressure format: {args.pressures}")
-            print("Please provide comma-separated numbers or a single number")
-            sys.exit(1)
+        pressure_points = _parse_pressures(args.pressures)
+    except ValueError as e:
+        print(f"ERROR: Invalid pressure format: {args.pressures}", file=sys.stderr)
+        print("Please provide comma-separated numbers or a single number", file=sys.stderr)
+        sys.exit(1)
     
     # Run simulation
     try:
@@ -867,13 +890,10 @@ def main():
             model_path=args.model,
             output_dir=args.output_dir,
             plot_isotherm=not args.no_plot,
-            hf_token=args.hf_token,
-            save_interval=args.save_interval,
-            restart=args.restart
+            hf_token=args.hf_token
         )
     except Exception as e:
-        print(f"\nERROR: {e}")
-        import traceback
+        print(f"\nERROR: {e}", file=sys.stderr)
         traceback.print_exc()
         sys.exit(1)
 

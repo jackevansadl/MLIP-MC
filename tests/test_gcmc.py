@@ -634,7 +634,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         # Set some state
@@ -648,14 +647,13 @@ class TestRestartMechanism:
         for _ in range(3):
             test_atoms = test_atoms + atoms_ads.copy()
         
-        # Save restart info to interval directory
-        interval_dir = os.path.join(output_dir, 'interval_100')
-        os.makedirs(interval_dir, exist_ok=True)
-        gcmc._save_restart_info_to_interval(test_atoms, interval_dir, 100)
+        # Save checkpoint
+        gcmc._save_checkpoint(test_atoms, 1)  # 1 step completed
         
-        # Check files exist in interval directory
-        restart_xyz = os.path.join(interval_dir, f'restart_{1.0:.5f}bar.xyz')
-        restart_json = os.path.join(interval_dir, f'restart_{1.0:.5f}bar.json')
+        # Check files exist in checkpoint directory
+        checkpoint_dir = os.path.join(output_dir, 'checkpoint')
+        restart_xyz = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.xyz')
+        restart_json = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.json')
         assert os.path.exists(restart_xyz)
         assert os.path.exists(restart_json)
         
@@ -663,7 +661,6 @@ class TestRestartMechanism:
         with open(restart_json, 'r') as f:
             data = json.load(f)
             assert data['Z_ads'] == 3
-            assert data['iteration'] == 100
             assert data['moves']['insertion']['attempted'] == 10
             assert data['moves']['insertion']['accepted'] == 5
             assert data['rejections']['insertion_vdw'] == 2
@@ -686,7 +683,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         gcmc1.Z_ads = 5
@@ -701,10 +697,8 @@ class TestRestartMechanism:
         for _ in range(5):
             test_atoms = test_atoms + atoms_ads.copy()
         
-        # Save to interval directory
-        interval_dir = os.path.join(output_dir, 'interval_200')
-        os.makedirs(interval_dir, exist_ok=True)
-        gcmc1._save_restart_info_to_interval(test_atoms, interval_dir, 200)
+        # Save to checkpoint directory
+        gcmc1._save_checkpoint(test_atoms, 1)  # 1 step completed
         
         # Now create a new instance and load
         gcmc2 = MLP_GCMC(
@@ -719,7 +713,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         loaded_atoms = gcmc2._load_restart_info()
@@ -751,7 +744,6 @@ class TestRestartMechanism:
             vdw_radii=vdw_radii,
             debug=False,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         # Should return None when files don't exist
@@ -780,7 +772,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         gcmc1.run(20)
@@ -790,16 +781,11 @@ class TestRestartMechanism:
         moves_after_first = {k: v.copy() for k, v in gcmc1.moves.items()}
         insertion_vdw_after_first = gcmc1.insertion_rejected_due_to_vdw
         
-        # Check restart files exist in interval directory (most recent)
-        # Find the most recent interval directory
-        interval_dirs = [d for d in os.listdir(output_dir) if d.startswith("interval_")]
-        assert len(interval_dirs) > 0, "No interval directories found"
-        # Get the most recent one
-        interval_numbers = [int(d.split('_')[1]) for d in interval_dirs]
-        most_recent = max(interval_numbers)
-        most_recent_dir = os.path.join(output_dir, f'interval_{most_recent}')
-        restart_xyz = os.path.join(most_recent_dir, f'restart_{1.0:.5f}bar.xyz')
-        restart_json = os.path.join(most_recent_dir, f'restart_{1.0:.5f}bar.json')
+        # Check restart files exist in checkpoint directory
+        checkpoint_dir = os.path.join(output_dir, 'checkpoint')
+        assert os.path.exists(checkpoint_dir), "Checkpoint directory should exist"
+        restart_xyz = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.xyz')
+        restart_json = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.json')
         assert os.path.exists(restart_xyz), f"Restart XYZ not found: {restart_xyz}"
         assert os.path.exists(restart_json), f"Restart JSON not found: {restart_json}"
         
@@ -827,7 +813,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         # Run additional 15 steps (total should be 35)
@@ -869,50 +854,20 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=5  # Save every 5 steps
         )
         
-        # Run 25 steps (should save at 5, 10, 15, 20, 25)
+        # Run 25 steps (checkpoint saved every step)
         gcmc.run(25)
         
-        # Check that restart files exist in interval directories (not main restart files)
-        interval_dirs = [d for d in os.listdir(output_dir) if d.startswith("interval_")]
-        assert len(interval_dirs) > 0, "No interval directories found"
+        # Check that restart files exist in checkpoint directory
+        checkpoint_dir = os.path.join(output_dir, 'checkpoint')
+        assert os.path.exists(checkpoint_dir), "Checkpoint directory should exist"
         # Check that main restart files don't exist (backward compatibility removed)
         assert not os.path.exists(f"{restart_prefix}.xyz"), "Main restart XYZ should not exist"
         assert not os.path.exists(f"{restart_prefix}.json"), "Main restart JSON should not exist"
         
-        # Check that snapshot files were created in interval directories
-        # Use absolute path to avoid issues with working directory changes
-        abs_output_dir = os.path.abspath(output_dir)
-        assert os.path.exists(abs_output_dir), f"Output directory {abs_output_dir} does not exist"
-        all_files = os.listdir(abs_output_dir)
-        interval_dirs = [d for d in all_files if d.startswith("interval_")]
-        # Should have at least a few interval directories (at iterations 5, 10, 15, 20, and final at 24)
-        # Note: iteration 25 doesn't happen because we run 25 steps (iterations 0-24)
-        assert len(interval_dirs) >= 4, f"Expected at least 4 interval directories, found {interval_dirs} in {abs_output_dir}. All files: {all_files}"
-        # Check that interval directories from save intervals contain snapshots
-        # (final save creates interval directory but may only have restart files)
-        snapshot_count = 0
-        for interval_dir in interval_dirs:
-            interval_path = os.path.join(abs_output_dir, interval_dir)
-            assert os.path.isdir(interval_path), f"Interval directory {interval_path} is not a directory"
-            files_in_dir = os.listdir(interval_path)
-            snapshot_files = [f for f in files_in_dir if f.startswith("snapshot_")]
-            restart_files = [f for f in files_in_dir if f.startswith("restart_")]
-            # Each interval directory should have either a snapshot (from periodic save) or restart files (from final save)
-            assert len(snapshot_files) >= 1 or len(restart_files) >= 1, \
-                f"No snapshot or restart files found in {interval_path}. Files: {files_in_dir}"
-            if len(snapshot_files) >= 1:
-                snapshot_count += 1
-        # Should have at least 4 snapshots (from periodic saves at 5, 10, 15, 20)
-        assert snapshot_count >= 4, f"Expected at least 4 snapshots, found {snapshot_count}"
-        
-        # Verify restart file has correct state (from most recent interval)
-        interval_numbers = [int(d.split('_')[1]) for d in interval_dirs]
-        most_recent = max(interval_numbers)
-        most_recent_dir = os.path.join(abs_output_dir, f'interval_{most_recent}')
-        restart_json = os.path.join(most_recent_dir, f'restart_{1.0:.5f}bar.json')
+        # Verify restart file has correct state (from checkpoint)
+        restart_json = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.json')
         with open(restart_json, 'r') as f:
             restart_data = json.load(f)
             assert restart_data['Z_ads'] == gcmc.Z_ads
@@ -934,7 +889,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=None,  # No restart
-            save_interval=10
         )
         
         gcmc.run(10)
@@ -968,7 +922,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=5
         )
         gcmc1.run(10)
         state1 = {
@@ -990,7 +943,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=5
         )
         assert gcmc2.Z_ads == state1['Z_ads']
         gcmc2.run(10)
@@ -1013,7 +965,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=5
         )
         assert gcmc3.Z_ads == state2['Z_ads']
         gcmc3.run(10)
@@ -1049,7 +1000,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         gcmc1.run(30)
         
@@ -1066,7 +1016,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         loaded_atoms = gcmc2._load_restart_info()
         
@@ -1093,7 +1042,6 @@ class TestRestartMechanism:
             vdw_radii=vdw_radii,
             debug=False,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         # Set all statistics fields
@@ -1120,10 +1068,9 @@ class TestRestartMechanism:
         
         # Save to interval directory
         output_dir = os.path.join(temp_dir, "results")
-        interval_dir = os.path.join(output_dir, 'interval_300')
-        os.makedirs(interval_dir, exist_ok=True)
         gcmc1.output_dir = output_dir
-        gcmc1._save_restart_info_to_interval(test_atoms, interval_dir, 300)
+        # Save checkpoint
+        gcmc1._save_checkpoint(test_atoms, 1)  # 1 step completed
         
         # Load and verify all fields
         gcmc2 = MLP_GCMC(
@@ -1138,7 +1085,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         gcmc2._load_restart_info()
         
@@ -1176,7 +1122,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         # Create test atoms with specific positions
@@ -1189,9 +1134,8 @@ class TestRestartMechanism:
         
         gcmc1.Z_ads = 3
         # Save to interval directory
-        interval_dir = os.path.join(output_dir, 'interval_400')
-        os.makedirs(interval_dir, exist_ok=True)
-        gcmc1._save_restart_info_to_interval(test_atoms, interval_dir, 400)
+        # Save checkpoint
+        gcmc1._save_checkpoint(test_atoms, 1)  # 1 step completed
         
         # Load and verify
         gcmc2 = MLP_GCMC(
@@ -1206,7 +1150,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         loaded_atoms = gcmc2._load_restart_info()
         
@@ -1234,16 +1177,14 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         gcmc1.Z_ads = 0
         gcmc1.moves['insertion']['attempted'] = 10
         gcmc1.moves['insertion']['accepted'] = 0
         # Save to interval directory
-        interval_dir = os.path.join(output_dir, 'interval_500')
-        os.makedirs(interval_dir, exist_ok=True)
-        gcmc1._save_restart_info_to_interval(atoms_frame.copy(), interval_dir, 500)
+        # Save checkpoint
+        gcmc1._save_checkpoint(atoms_frame.copy(), 1)  # 1 step completed
         
         # Load and verify
         gcmc2 = MLP_GCMC(
@@ -1258,7 +1199,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         loaded_atoms = gcmc2._load_restart_info()
         
@@ -1267,9 +1207,9 @@ class TestRestartMechanism:
         assert gcmc2.moves['insertion']['attempted'] == 10
         assert gcmc2.moves['insertion']['accepted'] == 0
     
-    def test_restart_with_save_interval_one(self, mock_model, atoms_frame, atoms_ads, temp_dir):
-        """Test restart with save_interval = 1 (save every step)."""
-        restart_prefix = os.path.join(temp_dir, "interval_one_restart")
+    def test_restart_with_checkpoint_saving(self, mock_model, atoms_frame, atoms_ads, temp_dir):
+        """Test that checkpoint is saved every step."""
+        restart_prefix = os.path.join(temp_dir, "checkpoint_restart")
         output_dir = os.path.join(temp_dir, "results")
         
         np.random.seed(42)
@@ -1286,23 +1226,22 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=1  # Save every step
         )
         
         gcmc.run(10)
         
-        # Should have many interval directories (one per step after iteration 0)
-        interval_dirs = [d for d in os.listdir(output_dir) if d.startswith("interval_")]
-        assert len(interval_dirs) >= 9  # At least 9 interval directories (iterations 1-9)
-        # Check that each interval directory contains a snapshot
-        for interval_dir in interval_dirs:
-            interval_path = os.path.join(output_dir, interval_dir)
-            snapshot_files = [f for f in os.listdir(interval_path) if f.startswith("snapshot_")]
-            assert len(snapshot_files) >= 1
+        # Check that checkpoint directory exists
+        checkpoint_dir = os.path.join(output_dir, "checkpoint")
+        assert os.path.exists(checkpoint_dir), "Checkpoint directory should exist"
+        
+        # Check that checkpoint files exist
+        checkpoint_files = os.listdir(checkpoint_dir)
+        restart_files = [f for f in checkpoint_files if f.startswith("restart_")]
+        assert len(restart_files) >= 1, "Should have at least one restart file in checkpoint"
     
-    def test_restart_with_large_save_interval(self, mock_model, atoms_frame, atoms_ads, temp_dir):
-        """Test restart with very large save_interval (larger than total steps)."""
-        restart_prefix = os.path.join(temp_dir, "large_interval_restart")
+    def test_restart_checkpoint_overwrites(self, mock_model, atoms_frame, atoms_ads, temp_dir):
+        """Test that checkpoint overwrites previous checkpoint each step."""
+        restart_prefix = os.path.join(temp_dir, "checkpoint_overwrite_restart")
         output_dir = os.path.join(temp_dir, "results")
         
         np.random.seed(42)
@@ -1319,30 +1258,26 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=1000  # Much larger than run steps
         )
         
         gcmc.run(20)
         
-        # Should still save at the end to interval directory
-        interval_dirs = [d for d in os.listdir(output_dir) if d.startswith("interval_")]
-        # Final save creates interval_19 (since we run 20 steps, iterations 0-19)
-        assert len(interval_dirs) == 1, f"Expected 1 interval directory (final save), found {interval_dirs}"
+        # Check that checkpoint directory exists
+        checkpoint_dir = os.path.join(output_dir, "checkpoint")
+        assert os.path.exists(checkpoint_dir), "Checkpoint directory should exist"
+        
+        # Check that checkpoint files exist (should only have one set, overwritten each step)
+        checkpoint_files = os.listdir(checkpoint_dir)
+        restart_files = [f for f in checkpoint_files if f.startswith("restart_")]
+        assert len(restart_files) >= 1, "Should have restart files in checkpoint"
+        
         # Check that main restart files don't exist (backward compatibility removed)
         assert not os.path.exists(f"{restart_prefix}.xyz"), "Main restart XYZ should not exist"
         assert not os.path.exists(f"{restart_prefix}.json"), "Main restart JSON should not exist"
-        
-        # But no intermediate interval directories (only final save creates one)
-        interval_dirs = [d for d in os.listdir(output_dir) if d.startswith("interval_")]
-        # Final save creates interval_19 (since we run 20 steps, iterations 0-19)
-        assert len(interval_dirs) == 1, f"Expected 1 interval directory (final save), found {interval_dirs}"
-        # Final interval should have restart files but no snapshot (since no periodic save occurred)
-        final_interval = os.path.join(output_dir, interval_dirs[0])
-        files_in_dir = os.listdir(final_interval)
-        restart_files = [f for f in files_in_dir if f.startswith("restart_")]
-        snapshot_files = [f for f in files_in_dir if f.startswith("snapshot_")]
-        assert len(restart_files) >= 1, "Final interval should have restart files"
-        assert len(snapshot_files) == 0, "Final interval should not have snapshot (no periodic save)"
+        # Checkpoint directory should only have restart files, no snapshots
+        snapshot_files = [f for f in checkpoint_files if f.startswith("snapshot_")]
+        assert len(restart_files) >= 1, "Checkpoint should have restart files"
+        assert len(snapshot_files) == 0, "Checkpoint should not have snapshot files"
         
         # Check that main restart files don't exist (backward compatibility removed)
         assert not os.path.exists(f"{restart_prefix}.xyz"), "Main restart XYZ should not exist"
@@ -1370,7 +1305,6 @@ class TestRestartMechanism:
             vdw_radii=vdw_radii,
             debug=False,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         # Should handle gracefully - either skip restart or use defaults
@@ -1423,7 +1357,6 @@ class TestRestartMechanism:
             vdw_radii=vdw_radii,
             debug=False,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         
         # Should handle gracefully - return None when XYZ is missing
@@ -1453,7 +1386,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         gcmc1.run(10)
         
@@ -1475,7 +1407,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         gcmc2.run(10)
         
@@ -1505,7 +1436,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         gcmc1.run(15)
         
@@ -1528,7 +1458,6 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
-            save_interval=10
         )
         gcmc2.run(10)
         
