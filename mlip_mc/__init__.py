@@ -9,8 +9,8 @@ __version__ = "0.1.0"
 
 from .src.gcmc import MLP_GCMC
 from .src.widom import MLP_Widom
-from .src.utilities import PREOS
+from .src.utilities import PREOS, read_binary_log
 from .main import run_gcmc
 
-__all__ = ['MLP_GCMC', 'MLP_Widom', 'PREOS', 'run_gcmc']
+__all__ = ['MLP_GCMC', 'MLP_Widom', 'PREOS', 'run_gcmc', 'read_binary_log']
 

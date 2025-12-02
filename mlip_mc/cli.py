@@ -96,6 +96,8 @@ Examples:
                         help='Hugging Face authentication token (optional, uses cached token if available)')
     parser.add_argument('--output-dir', type=str, default='results',
                         help='Output directory for results (default: results)')
+    parser.add_argument('--save-interval', type=int, default=1000,
+                        help='Interval for saving checkpoints (default: 1000)')
     parser.add_argument('--no-plot', action='store_true',
                         help='Skip generating isotherm plot')
     
@@ -104,11 +106,10 @@ Examples:
 
 def main() -> None:
     """Main entry point for the CLI."""
-    # Use 'spawn' to ensure fresh processes for CUDA isolation
     try:
         mp.set_start_method('spawn')
     except RuntimeError:
-        pass  # Context might already be set
+        pass
     
     args = parse_arguments()
     
@@ -139,7 +140,8 @@ def main() -> None:
             model_path=args.model,
             output_dir=args.output_dir,
             plot_isotherm=not args.no_plot,
-            hf_token=args.hf_token
+            hf_token=args.hf_token,
+            save_interval=args.save_interval
         )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)
