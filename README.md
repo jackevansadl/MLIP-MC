@@ -42,6 +42,7 @@ mlip_mc \\
     --pressures 0.1,0.5,1.0,2.0,5.0,10.0,20.0 \\
     --n-equil 10000 \\
     --n-prod 20000 \\
+    --save-interval 1000 \\
     --output-dir results
 ```
 
@@ -53,6 +54,7 @@ mlip_mc \\
 - `--pressures`: Comma-separated pressures in bar, or single number **(required)**
 - `--n-equil`: Number of equilibration steps (default: 10000)
 - `--n-prod`: Number of production steps (default: 20000)
+- `--save-interval`: Interval for saving history checkpoints (default: 1000)
 - `--model`: Path to MLIP model file. Can be a local path (default: `models/model.pt`) or a Hugging Face repository name like `fengxuyoung/MLIP-MC` (or `hf://fengxuyoung/MLIP-MC`). Missing files are automatically downloaded and cached.
 - `--output-dir`: Output directory (default: results)
 - `--no-plot`: Skip generating isotherm plot
@@ -76,12 +78,16 @@ Simulations generate output files in the specified output directory (default: `r
 - **GCMC Isotherm (using `run_gcmc()`)**:
   - `isotherm.png`: Plot of adsorption isotherm
   - `isotherm_data.json`: Complete isotherm data (pressures, uptakes, energies, etc.)
-  - `results_{pressure}bar.json`: Individual pressure point data (uptake, adsorption energy)
-  - `traj_{pressure}bar.xyz`: Trajectory file with all configurations for each pressure
+  - `log_{pressure}bar.bin`: Binary log file containing all iteration data (step, uptake, interaction_energy, total_energy)
+  - `restart/restart_{pressure}bar.xyz` and `.json`: Restart information (updated every step for crash recovery)
+  - `checkpoints_{pressure}bar/checkpoint_{step}/`: History checkpoints saved at intervals specified by `--save-interval`
+    - `traj.xyz`: Snapshot trajectory
+    - `results.json`: Snapshot results (n_iter, uptake, interaction_energy, total_energy)
   
 - **GCMC (direct class usage)**: 
-  - `results_{pressure}bar.json`: Uptake and adsorption energy data
-  - `traj_{pressure}bar.xyz`: Trajectory file with all configurations
+  - `log_{pressure}bar.bin`: Binary log file with all iteration data
+  - `restart/restart_{pressure}bar.xyz` and `.json`: Restart information
+  - `checkpoints_{pressure}bar/checkpoint_{step}/`: History checkpoints
   
 - **Widom**:
   - `widom_results.json`: Adsorption energies and calculated properties
