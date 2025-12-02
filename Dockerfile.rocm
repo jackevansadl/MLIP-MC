@@ -16,7 +16,7 @@ WORKDIR /app
 COPY . /app
 
 # Install the current project
-RUN pip install . --break-system-packages
+RUN pip install ".[mace-torch]" --break-system-packages
 
 # Default command to keep the container running or drop into a shell
 CMD ["/bin/bash"]
