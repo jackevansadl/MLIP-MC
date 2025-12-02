@@ -23,7 +23,6 @@ from ase import Atoms
 from ase.io import read
 from ase.build import molecule
 from ase.units import bar
-from ase.data import vdw_radii
 
 # NOTE: We delay import of torch, fairchem, and other heavy libraries 
 # until inside the process to ensure CUDA environment variables take effect first.
@@ -322,9 +321,7 @@ def run_single_pressure(
             os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
         
         # 2. Import libraries AFTER setting environment variables
-        import torch
-        from fairchem.core import FAIRChemCalculator
-        from fairchem.core.units.mlip_unit import load_predict_unit
+        from nequip.ase.nequip_calculator import NequIPCalculator
         from mlip_mc.src.gcmc import MLP_GCMC
         from mlip_mc.src.utilities import PREOS
         
@@ -337,9 +334,25 @@ def run_single_pressure(
         else:
             device = 'cpu'
         
+
+        model = NequIPCalculator.from_deployed_model(model_path = model_path,
+                                                    species_to_type_name = {"C" : "C",
+                                                                            "H" : "H",
+                                                                            "N" : "N",
+                                                                            "O" : "O",
+                                                                            "Zn" : "Zn",
+                                                                            "Co" : "Co",
+                                                                            "Os" : "Os"},
+                                                    device=device)
+
+        from ase.data import vdw_radii
+
+        vdw_radii = vdw_radii.copy()
+        vdw_radii[76] = vdw_radii[8]
+        vdw_radii[27] = vdw_radii[6]
+        # Mg radius is set to 1.0 A
+        vdw_radii[12] = 1.0
         # Load model on this GPU
-        predictor = load_predict_unit(model_path, device=device)
-        model = FAIRChemCalculator(predictor, task_name="odac")
         
         P = P_bar * bar
         device_str = _format_device_str(gpu_id)

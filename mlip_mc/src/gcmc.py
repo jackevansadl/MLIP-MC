@@ -52,7 +52,7 @@ def e_interaction_of_adsorption(
     float
         Interaction energy
     """
-    return e_system - framework_E - n_adsorbed_species * ads_energy
+    return e_system # - framework_E - n_adsorbed_species * ads_energy
 
 class MLP_GCMC:
     """

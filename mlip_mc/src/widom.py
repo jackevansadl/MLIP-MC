@@ -151,7 +151,7 @@ class MLP_Widom:
 
                 # Calculate Interaction Energy (Delta E)
                 # E_int = E_total - E_framework - E_adsorbate
-                interaction_E = e_trial - framework_E - adsorbate_E
+                interaction_E = e_trial # - framework_E - adsorbate_E
                 e_adsorptions.append(interaction_E)
                 
                 # Save trajectory of valid insertions
