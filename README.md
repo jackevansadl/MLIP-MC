@@ -117,6 +117,7 @@ The `isotherm_data.json` file contains:
 ## Supported Compounds
 
 The Peng-Robinson EOS supports the following compounds (via `PREOS.from_name()`):
+
 |---------|------------------|---------|------------------|---------|------------------|---------|------------------|
 | H2      | hydrogen         | He      | helium           | NH3     | ammonia          | H2O     | water            |
 | CH4     | methane          | N2      | nitrogen         | O2      | oxygen           | Ar      | argon            |
