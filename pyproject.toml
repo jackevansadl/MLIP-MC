@@ -16,11 +16,8 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Chemistry",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
 ]
-dependencies = ["fairchem-core"]
+dependencies = ["molmod==1.4.8", "numpy==1.26.4", "Cython==0.29.37", "nequip==0.5.6", "torch==1.12.1", "e3nn==0.4.4"] 
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -39,4 +36,3 @@ include = ["mlip_mc", "mlip_mc.*"]
 
 [tool.setuptools.package-data]
 mlip_mc = ["data/*.csv"]
-
