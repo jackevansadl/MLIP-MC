@@ -20,10 +20,12 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = ["fairchem-core", "mace-torch"]
+dependencies = ["ase", "huggingface_hub"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+fairchem = ["fairchem-core"]
+mace-torch = ["mace-torch"]
 
 [project.scripts]
 mlip_mc = "mlip_mc.cli:main"
@@ -39,4 +41,3 @@ include = ["mlip_mc", "mlip_mc.*"]
 
 [tool.setuptools.package-data]
 mlip_mc = ["data/*.csv"]
-

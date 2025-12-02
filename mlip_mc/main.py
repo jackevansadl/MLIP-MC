@@ -26,7 +26,7 @@ from ase.build import molecule
 from ase.units import bar
 from ase.data import vdw_radii
 
-# NOTE: We delay import of torch, fairchem, and other heavy libraries 
+# NOTE: We delay import of torch, fairchem/mace-torch, and other heavy libraries 
 # until inside the process to ensure CUDA environment variables take effect first.
 
 
@@ -281,6 +281,81 @@ def _format_device_str(gpu_id: Union[int, str]) -> str:
     return f"GPU {gpu_id}" if isinstance(gpu_id, int) else "CPU"
 
 
+def _detect_backend() -> str:
+    """
+    Detect which MLIP backend is available.
+    
+    Returns
+    -------
+    str
+        'fairchem' or 'mace-torch', raises ImportError if neither is available
+    """
+    try:
+        import fairchem.core
+        return 'fairchem'
+    except ImportError:
+        pass
+    
+    try:
+        from mace.calculators import mace_mp
+        return 'mace-torch'
+    except ImportError:
+        pass
+    
+    raise ImportError(
+        "No MLIP backend found. Please install either:\n"
+        "  pip install mlip-mc[fairchem]\n"
+        "  pip install mlip-mc[mace-torch]"
+    )
+
+
+def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> Any:
+    """
+    Load an MLIP model using the appropriate backend.
+    
+    Parameters
+    ----------
+    model_path : str
+        Path to the model file (local path or HuggingFace repo)
+    device : str
+        Device to use ('cuda' or 'cpu')
+    backend : str, optional
+        Backend to use ('fairchem' or 'mace-torch'). If None, auto-detects.
+    
+    Returns
+    -------
+    Any
+        ASE calculator instance (FAIRChemCalculator or mace_mp)
+    """
+    if backend is None:
+        backend = _detect_backend()
+    
+    if backend == 'fairchem':
+        from fairchem.core import FAIRChemCalculator
+        from fairchem.core.units.mlip_unit import load_predict_unit
+        
+        predictor = load_predict_unit(model_path, device=device)
+        model = FAIRChemCalculator(predictor, task_name="odac")
+        return model
+    
+    elif backend == 'mace-torch':
+        from mace.calculators import mace_mp
+        
+        # MACE uses 'cuda' or 'cpu' for device, same as fairchem
+        # Convert device string if needed (should already be 'cuda' or 'cpu')
+        mace_device = device if device in ('cuda', 'cpu') else 'cpu'
+        
+        model = mace_mp(
+            model=model_path,
+            default_dtype="float64",
+            device=mace_device
+        )
+        return model
+    
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
+
+
 def run_single_pressure(
     P_bar: float,
     T: float,
@@ -333,8 +408,6 @@ def run_single_pressure(
         
         # 2. Import libraries AFTER setting environment variables
         import torch
-        from fairchem.core import FAIRChemCalculator
-        from fairchem.core.units.mlip_unit import load_predict_unit
         from mlip_mc.src.gcmc import MLP_GCMC
         from mlip_mc.src.utilities import PREOS
         
@@ -342,17 +415,18 @@ def run_single_pressure(
         if isinstance(gpu_id, int) and torch.cuda.is_available():
             # Even though we requested gpu_id, inside this process it will appear as cuda:0
             # because we masked the others with CUDA_VISIBLE_DEVICES
-            # IMPORTANT: fairchem strictly requires 'cuda' or 'cpu', not 'cuda:0'
+            # IMPORTANT: both backends require 'cuda' or 'cpu', not 'cuda:0'
             device = 'cuda' 
         else:
             device = 'cpu'
         
-        # Load model on this GPU
-        predictor = load_predict_unit(model_path, device=device)
-        model = FAIRChemCalculator(predictor, task_name="odac")
+        # 4. Detect backend and load model
+        backend = _detect_backend()
+        device_str = _format_device_str(gpu_id)
+        print(f"  [{device_str}] Using backend: {backend}")
+        model = _load_model(model_path, device=device, backend=backend)
         
         P = P_bar * bar
-        device_str = _format_device_str(gpu_id)
         print(f"  [{device_str}] Starting simulation at P = {P_bar:.2f} bar")
         
         # Calculate Fugacity using Peng-Robinson EOS
@@ -511,8 +585,6 @@ def run_gcmc(
     n_production_steps: int = 20000,
     model_path: str = "models/model.pt",
     output_dir: str = 'results',
-    plot_isotherm: bool = True,
-    adsorbate_label: Optional[str] = None,
     hf_token: Optional[str] = None,
     save_interval: int = 1000
 ) -> Dict[str, Any]:
@@ -544,10 +616,6 @@ def run_gcmc(
         Missing files are automatically downloaded from Hugging Face and cached.
     output_dir : str, optional
         Directory to save results (default: 'results')
-    plot_isotherm : bool, optional
-        Whether to generate and save isotherm plot (default: True)
-    adsorbate_label : str, optional
-        Label for adsorbate in plot title (default: inferred from file/molecule name)
     hf_token : str, optional
         Hugging Face authentication token. If None, uses cached token or prompts for login
     save_interval : int, optional
@@ -577,7 +645,6 @@ def run_gcmc(
             pass
     
     import torch
-    import matplotlib.pyplot as plt
 
     # Check available GPUs
     _print_subsection("Hardware Configuration")
@@ -636,8 +703,6 @@ def run_gcmc(
         _print_info("Adsorbate", f"Loading from {adsorbate_path}...")
         atoms_ads = read(adsorbate_path)
         atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
-        if adsorbate_label is None:
-            adsorbate_label = os.path.basename(adsorbate_path).replace('.xyz', '').replace('.cif', '')
         if adsorbate_molecule is not None:
             adsorbate_name = adsorbate_molecule
             _print_info("Adsorbate Name", adsorbate_name)
@@ -648,8 +713,6 @@ def run_gcmc(
         _print_info("Adsorbate", f"Creating {adsorbate_molecule} molecule...")
         atoms_ads = molecule(adsorbate_molecule)
         atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
-        if adsorbate_label is None:
-            adsorbate_label = adsorbate_molecule
         adsorbate_name = adsorbate_molecule
         _print_info("Adsorbate Name", adsorbate_name)
     else:
@@ -737,32 +800,6 @@ def run_gcmc(
             if 'error' in r:
                 print(f"    Error: {r['error']}", file=sys.stderr)
     
-    if plot_isotherm and len(pressures) > 0:
-        _print_subsection("Post-Processing")
-        print("  Generating isotherm plot...")
-        
-        plt.figure(figsize=(10, 6))
-        plt.errorbar(pressures, uptakes, yerr=uptake_stds, 
-                     marker='o', linestyle='-', linewidth=2, markersize=8,
-                     capsize=5, capthick=2, label='GCMC Simulation')
-        plt.xlabel('Pressure (bar)', fontsize=12)
-        plt.ylabel('Uptake (molecules/unit cell)', fontsize=12)
-        
-        title = f'{adsorbate_label} Adsorption Isotherm'
-        if hasattr(atoms_frame, 'get_chemical_symbols'):
-            title += f' in {atoms_frame.get_chemical_symbols()[0]} framework'
-        title += f' at {temperature} K'
-        plt.title(title, fontsize=14, fontweight='bold')
-        
-        plt.grid(True, alpha=0.3)
-        plt.legend(fontsize=11)
-        plt.tight_layout()
-        
-        os.makedirs(output_dir, exist_ok=True)
-        plot_filename = os.path.join(output_dir, 'isotherm.png')
-        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-        _print_success(f"Isotherm plot saved to {plot_filename}")
-    
     isotherm_data = {
         'temperature': temperature,
         'pressures': pressures,
@@ -796,12 +833,6 @@ def run_gcmc(
     print(f"  Results saved to: {output_dir}/")
     print()
     
-    if plot_isotherm and len(pressures) > 0:
-        try:
-            plt.show()
-        except Exception:
-            print("  (Plot display not available in non-interactive environment)")
-    
     return isotherm_data
 
 
@@ -824,24 +855,8 @@ Examples:
       --n-equil 10000 \\
       --n-prod 20000 \\
       --model models/model.pt \\
-      --output-dir my_results
-
-  # Single pressure point
-  python main.py \\
-      --adsorbent tests/zif8.xyz \\
-      --adsorbate-molecule CO2 \\
-      --temperature 298.0 \\
-      --pressures 1.0 \\
-      --n-equil 5000 \\
-      --n-prod 15000
-
-  # Skip plotting
-  python main.py \\
-      --adsorbent tests/zif8.xyz \\
-      --adsorbate-molecule CO2 \\
-      --temperature 298.0 \\
-      --pressures 1.0 \\
-      --no-plot
+      --output-dir my_results \\
+      --save-interval 1000
         """
     )
     
@@ -867,8 +882,6 @@ Examples:
                         help='Output directory for results (default: results)')
     parser.add_argument('--save-interval', type=int, default=1000,
                         help='Interval for saving checkpoints (default: 1000)')
-    parser.add_argument('--no-plot', action='store_true',
-                        help='Skip generating isotherm plot')
     
     return parser.parse_args()
 
@@ -936,7 +949,6 @@ def main() -> None:
             n_production_steps=args.n_prod,
             model_path=args.model,
             output_dir=args.output_dir,
-            plot_isotherm=not args.no_plot,
             hf_token=args.hf_token,
             save_interval=args.save_interval
         )

@@ -65,14 +65,6 @@ Examples:
       --pressures 1.0 \\
       --n-equil 5000 \\
       --n-prod 15000
-
-  # Skip plotting
-  mlip_mc \\
-      --adsorbent framework.xyz \\
-      --adsorbate-molecule CO2 \\
-      --temperature 298.0 \\
-      --pressures 1.0 \\
-      --no-plot
         """
     )
     
@@ -98,8 +90,6 @@ Examples:
                         help='Output directory for results (default: results)')
     parser.add_argument('--save-interval', type=int, default=1000,
                         help='Interval for saving checkpoints (default: 1000)')
-    parser.add_argument('--no-plot', action='store_true',
-                        help='Skip generating isotherm plot')
     
     return parser.parse_args()
 
@@ -139,7 +129,6 @@ def main() -> None:
             n_production_steps=args.n_prod,
             model_path=args.model,
             output_dir=args.output_dir,
-            plot_isotherm=not args.no_plot,
             hf_token=args.hf_token,
             save_interval=args.save_interval
         )
