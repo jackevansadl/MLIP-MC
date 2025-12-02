@@ -1,4 +1,6 @@
 import numpy as np
+import struct
+from typing import List, Dict, Any
 from ase.units import Pascal, _hplanck, kB, _e, _hbar, _amu
 from pathlib import Path
 
@@ -342,5 +344,55 @@ class PREOS(EOS):
         mu += np.log(P / Pref)
         mu *= T * boltzmann
         return mu, Pref
+
+
+def read_binary_log(log_path: str) -> List[Dict[str, Any]]:
+    """
+    Read binary log file from GCMC simulation and return list of records.
+    
+    Parameters
+    ----------
+    log_path : str
+        Path to the binary log file (e.g., 'results/log_0.10000bar.bin')
+        
+    Returns
+    -------
+    List[Dict[str, Any]]
+        List of dictionaries, each containing:
+        - 'step': int - step number
+        - 'uptake': int - number of adsorbed molecules
+        - 'interaction_energy': float - interaction energy in eV
+        - 'total_energy': float - total energy in eV
+        
+    Examples
+    --------
+    >>> from mlip_mc import read_binary_log
+    >>> data = read_binary_log('results/log_0.10000bar.bin')
+    >>> print(f"Total steps: {len(data)}")
+    >>> print(f"Average uptake: {np.mean([r['uptake'] for r in data]):.2f}")
+    """
+    data = []
+    # Format: step (int 4), uptake (int 4), interaction_energy (double 8), total_energy (double 8) -> 24 bytes
+    record_size = 24
+    
+    try:
+        with open(log_path, "rb") as f:
+            while True:
+                bytes_read = f.read(record_size)
+                if not bytes_read or len(bytes_read) < record_size:
+                    break
+                step, uptake, interaction_energy, total_energy = struct.unpack("iidd", bytes_read)
+                data.append({
+                    'step': step,
+                    'uptake': uptake,
+                    'interaction_energy': interaction_energy,
+                    'total_energy': total_energy
+                })
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Log file not found: {log_path}")
+    except Exception as e:
+        raise ValueError(f"Error reading binary log {log_path}: {e}")
+    
+    return data
 
 

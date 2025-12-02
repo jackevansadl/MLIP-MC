@@ -1,6 +1,7 @@
 import os
 import json
 import sys
+import struct
 import traceback
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
@@ -62,10 +63,8 @@ class MLP_GCMC:
     potentials to study gas adsorption in porous materials.
     """
     
-    def __init__(self, model, atoms_frame, atoms_ads, T, P, fugacity, device, vdw_radii, debug=False, output_dir='results', restart_prefix=None, n_equilibration_steps=None, n_production_steps=None):
+    def __init__(self, model, atoms_frame, atoms_ads, T, P, fugacity, device, vdw_radii, debug=False, output_dir='results', restart_prefix=None, n_equilibration_steps=None, n_production_steps=None, save_interval=1000):
         # Note: restart_prefix is kept for backward compatibility but not used
-        # Checkpoints and results are now saved automatically every step
-        # n_equilibration_steps and n_production_steps: used to track equilibration vs production phase in checkpoints
         self.model = model
         self.atoms_frame = atoms_frame
         self.n_frame = len(self.atoms_frame)
@@ -98,6 +97,7 @@ class MLP_GCMC:
         self.restart_prefix = restart_prefix  # Kept for backward compatibility (not used)
         self.n_equilibration_steps = n_equilibration_steps  # Total equilibration steps (target)
         self.n_production_steps = n_production_steps  # Total production steps (target)
+        self.save_interval = save_interval
         
         # Restart tracking (set when loading checkpoint)
         self._restart_n_equil_completed = 0
@@ -110,6 +110,10 @@ class MLP_GCMC:
             'translation': {'attempted': 0, 'accepted': 0},
             'rotation': {'attempted': 0, 'accepted': 0}
         }
+        
+        # Initialize binary log file path
+        self.log_file_path = Path(self.output_dir) / f"log_{self.P/bar:.5f}bar.bin"
+
 
     def _debug_print(self, message: str, accepted: bool) -> None:
         """Print debug message if debug mode is enabled."""
@@ -226,25 +230,26 @@ class MLP_GCMC:
         
         return accepted
 
-    def _get_checkpoint_paths(self) -> Tuple[str, str]:
-        """Get checkpoint file paths."""
-        checkpoint_dir = os.path.join(self.output_dir, 'checkpoint')
-        restart_xyz = os.path.join(checkpoint_dir, f'restart_{self.P/bar:.5f}bar.xyz')
-        restart_json = os.path.join(checkpoint_dir, f'restart_{self.P/bar:.5f}bar.json')
+    def _log_step_binary(self, step: int, uptake: int, interaction_energy: float, total_energy: float) -> None:
+        """Append a step record to the binary log file."""
+        with open(self.log_file_path, "ab") as f:
+            f.write(struct.pack("iidd", step, int(uptake), float(interaction_energy), float(total_energy)))
+
+    def _get_restart_paths(self) -> Tuple[str, str]:
+        """Get restart file paths."""
+        restart_dir = os.path.join(self.output_dir, 'restart')
+        restart_xyz = os.path.join(restart_dir, f'restart_{self.P/bar:.5f}bar.xyz')
+        restart_json = os.path.join(restart_dir, f'restart_{self.P/bar:.5f}bar.json')
         return restart_xyz, restart_json
 
-    def _save_checkpoint(self, atoms: Atoms, steps_in_this_run: int) -> None:
-        """Saves checkpoint to checkpoint directory (overwrites previous checkpoint).
+    def _save_history_checkpoint(self, atoms: Atoms, step: int, uptake: int, interaction_energy: float, total_energy: float) -> None:
+        """Save a history checkpoint to checkpoints_{pressure}bar/checkpoint_{step} folder."""
+        # Create parent folder for all checkpoints at this pressure
+        checkpoints_parent_dir = Path(self.output_dir) / f'checkpoints_{self.P/bar:.5f}bar'
+        checkpoints_parent_dir.mkdir(parents=True, exist_ok=True)
         
-        Parameters
-        ----------
-        atoms : Atoms
-            Current atomic structure
-        steps_in_this_run : int
-            Number of steps completed in this run (1-indexed, so 1 means first step completed)
-        """
-        # Create checkpoint directory
-        checkpoint_dir = Path(self.output_dir) / 'checkpoint'
+        # Create individual checkpoint folder inside the parent
+        checkpoint_dir = checkpoints_parent_dir / f'checkpoint_{step}'
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         # Clean atoms object (remove calculator)
@@ -256,46 +261,58 @@ class MLP_GCMC:
         )
         atoms_clean.calc = None
         
-        # Save checkpoint files (overwrite previous)
-        restart_xyz, restart_json = self._get_checkpoint_paths()
+        # Save trajectory snapshot
+        traj_file = checkpoint_dir / 'traj.xyz'
+        write(str(traj_file), atoms_clean)
+        
+        # Save results snapshot
+        results_data = {
+            'n_iter': step,
+            'uptake': int(uptake),
+            'interaction_energy': float(interaction_energy),
+            'total_energy': float(total_energy)
+        }
+        results_file = checkpoint_dir / 'results.json'
+        with open(results_file, 'w') as f:
+            json.dump(results_data, f, indent=4)
+
+    def _save_restart(self, atoms: Atoms, absolute_step: int) -> None:
+        """Save restart info to restart directory (overwrites previous restart info).
+        
+        Parameters
+        ----------
+        atoms : Atoms
+            Current atomic structure
+        absolute_step : int
+            Absolute step number (total steps completed across all runs, 1-indexed)
+        """
+        # Create restart directory
+        restart_dir = Path(self.output_dir) / 'restart'
+        restart_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Clean atoms object (remove calculator)
+        atoms_clean = Atoms(
+            numbers=atoms.numbers,
+            positions=atoms.positions,
+            cell=atoms.cell,
+            pbc=atoms.pbc
+        )
+        atoms_clean.calc = None
+        
+        # Save restart files (overwrite previous)
+        restart_xyz, restart_json = self._get_restart_paths()
         write(restart_xyz, atoms_clean)
         
         # Calculate equilibration and production steps completed
-        # steps_in_this_run is 1-indexed: 1 = first step completed, 2 = second step completed, etc.
         if self.n_equilibration_steps is not None:
-            
-            # If we restarted, we need to account for previously completed steps
-            if self._restart_iteration >= 0:
-                # We restarted - calculate total steps completed including previous run
-                prev_equil_completed = self._restart_n_equil_completed
-                prev_prod_completed = self._restart_n_prod_completed
-                
-                # Calculate how many equilibration steps we've done in this run
-                equil_remaining = self.n_equilibration_steps - prev_equil_completed
-                
-                if equil_remaining > 0:
-                    # Still have equilibration steps to complete
-                    equil_done_in_this_run = min(steps_in_this_run, equil_remaining)
-                    prod_done_in_this_run = max(0, steps_in_this_run - equil_remaining)
-                else:
-                    # Equilibration already complete, all new steps are production
-                    equil_done_in_this_run = 0
-                    prod_done_in_this_run = steps_in_this_run
-                
-                # Total completed = previous + new in this run
-                n_equil_completed = prev_equil_completed + equil_done_in_this_run
-                n_prod_completed = prev_prod_completed + prod_done_in_this_run
+            if absolute_step <= self.n_equilibration_steps:
+                # Still in equilibration phase
+                n_equil_completed = absolute_step
+                n_prod_completed = 0
             else:
-                # Fresh start - no previous steps
-                total_steps_completed = steps_in_this_run
-                if total_steps_completed <= self.n_equilibration_steps:
-                    # Still in equilibration phase
-                    n_equil_completed = total_steps_completed
-                    n_prod_completed = 0
-                else:
-                    # Past equilibration, now in production phase
-                    n_equil_completed = self.n_equilibration_steps
-                    n_prod_completed = total_steps_completed - self.n_equilibration_steps
+                # Past equilibration, now in production phase
+                n_equil_completed = self.n_equilibration_steps
+                n_prod_completed = absolute_step - self.n_equilibration_steps
         else:
             n_equil_completed = None
             n_prod_completed = None
@@ -321,18 +338,18 @@ class MLP_GCMC:
             json.dump(restart_data, f, indent=4)
 
     def _load_restart_info(self) -> Optional[Atoms]:
-        """Loads the state from checkpoint directory (automatic restart)."""
+        """Load the state from restart directory (automatic restart)."""
         if not self.output_dir:
             return None
         
         try:
-            checkpoint_dir = Path(self.output_dir) / 'checkpoint'
+            restart_dir = Path(self.output_dir) / 'restart'
             
-            if not checkpoint_dir.exists():
-                print("--- No checkpoint directory found. Starting new simulation. ---")
+            if not restart_dir.exists():
+                print("--- No restart directory found. Starting new simulation. ---")
                 return None
             
-            restart_xyz, restart_json = self._get_checkpoint_paths()
+            restart_xyz, restart_json = self._get_restart_paths()
             
             if os.path.exists(restart_xyz) and os.path.exists(restart_json):
                 atoms = read(restart_xyz)
@@ -351,30 +368,17 @@ class MLP_GCMC:
                 self.deletion_accepted_due_to_acceptance_100 = rejections.get('deletion_acc_100', 0)
                 self.deletion_rejected_due_to_acceptance_100 = rejections.get('deletion_rej_100', 0)
 
-                # Get completed steps from checkpoint
-                n_equil_completed = restart_data.get('n_equil_completed')
-                n_prod_completed = restart_data.get('n_prod_completed')
+                n_equil_completed = restart_data.get('n_equil_completed', 0) or 0
+                n_prod_completed = restart_data.get('n_prod_completed', 0) or 0
                 
-                # Handle None values (when equilibration/production steps weren't set)
-                if n_equil_completed is None:
-                    n_equil_completed = 0
-                if n_prod_completed is None:
-                    n_prod_completed = 0
-                
-                # Use the passed n_equil and n_prod values (not from checkpoint)
-                # This allows changing the target steps on restart
-                # Store the starting point for continuation
                 self._restart_n_equil_completed = n_equil_completed
                 self._restart_n_prod_completed = n_prod_completed
                 
-                # Calculate total steps completed (for determining starting iteration)
                 total_steps_completed = n_equil_completed + n_prod_completed
-                # Set _restart_iteration to indicate we found a checkpoint
-                # Use total_steps_completed - 1 (0-indexed), or 0 if no steps completed yet
                 self._restart_iteration = total_steps_completed - 1 if total_steps_completed > 0 else 0
                 
                 if self.n_equilibration_steps is not None and self.n_production_steps is not None:
-                    print(f"--- Restarting simulation from checkpoint, Z_ads = {self.Z_ads} ---")
+                    print(f"--- Restarting simulation from restart info, Z_ads = {self.Z_ads} ---")
                     print(f"    Equilibration: {n_equil_completed}/{self.n_equilibration_steps} steps completed")
                     print(f"    Production: {n_prod_completed}/{self.n_production_steps} steps completed")
                     if n_equil_completed < self.n_equilibration_steps:
@@ -384,10 +388,10 @@ class MLP_GCMC:
                         remaining_prod = self.n_production_steps - n_prod_completed
                         print(f"    Continuing with {remaining_prod} remaining production steps")
                 else:
-                    print(f"--- Restarting simulation from checkpoint, Z_ads = {self.Z_ads} ---")
+                    print(f"--- Restarting simulation from restart info, Z_ads = {self.Z_ads} ---")
                 return atoms
             
-            print("--- No valid restart files found in checkpoint directory. Starting new simulation. ---")
+            print("--- No valid restart files found in restart directory. Starting new simulation. ---")
             return None
         except Exception as e:
             print(f"--- Error loading restart files: {e}. Starting new simulation. ---", file=sys.stderr)
@@ -432,7 +436,7 @@ class MLP_GCMC:
         interaction_energy: List[float],
         total_energy: List[float]
     ) -> None:
-        """Saves uptake and energy data to a JSON file."""
+        """Save uptake and energy data to a JSON file."""
         results_data = {
             'uptake': uptake,
             'interaction_energy': interaction_energy,
@@ -457,9 +461,7 @@ class MLP_GCMC:
             If restarting, only the remaining steps will be run.
         """
         
-        # Automatically check for checkpoint and restart if available
         atoms = self._load_restart_info()
-        # If _load_restart_info returns None, it means no restart files were found
         if atoms is None:
             # No restart found, start fresh
             atoms = self.atoms_frame.copy()
@@ -491,33 +493,11 @@ class MLP_GCMC:
 
         print(f'framework E: {framework_E}, adsorbate_E: {adsorbate_E}')
 
-        uptake = []
-        interaction_energy = []
-        total_energy = []
-
-        # Load previous results if they exist (when restarting)
-        # Check if we have a checkpoint by checking if restart attributes are set
-        has_checkpoint = (hasattr(self, '_restart_n_equil_completed') and 
-                         hasattr(self, '_restart_n_prod_completed'))
-        results_filename = Path(self.output_dir) / f"results_{self.P/bar:.5f}bar.json"
-        if has_checkpoint and results_filename.exists():
-            try:
-                with open(results_filename, 'r') as f:
-                    data = json.load(f)
-                    uptake = data.get('uptake', [])
-                    interaction_energy = data.get('interaction_energy', [])
-                    total_energy = data.get('total_energy', [])
-            except Exception as err:
-                print(f"Warning: Could not load previous results: {err}", file=sys.stderr)
-
-        # Determine how many steps to run
-        # Check if we have a checkpoint (by checking if checkpoint was loaded)
         checkpoint_loaded = (self._restart_iteration >= 0 or 
                             (hasattr(self, '_restart_n_equil_completed') and 
                              hasattr(self, '_restart_n_prod_completed')))
         
         if checkpoint_loaded:
-            # We restarted - calculate remaining steps needed
             total_completed = self._restart_n_equil_completed + self._restart_n_prod_completed
             if (self.n_equilibration_steps is not None and 
                 self.n_production_steps is not None):
@@ -529,10 +509,8 @@ class MLP_GCMC:
                 print(f"--- Already completed {total_completed} steps. Target is {total_target} steps. Nothing to do. ---")
                 return
             print(f"--- Continuing simulation: {steps_to_run} steps remaining (already completed {total_completed}/{total_target}) ---")
-            # Adjust iteration offset so that iteration 0 in this run corresponds to the continuation point
             iteration_offset = self._restart_iteration + 1 if self._restart_iteration >= 0 else 0
         else:
-            # Fresh start
             steps_to_run = N
             iteration_offset = 0
         
@@ -639,32 +617,18 @@ class MLP_GCMC:
                         e = e_trial
                         self.moves['rotation']['accepted'] += 1
 
-            uptake.append(self.Z_ads)
-            interaction_energy.append(interaction_E)
-            total_energy.append(e)
+            current_step = iteration + 1 + iteration_offset
+            self._log_step_binary(current_step, self.Z_ads, interaction_E, e)
+            self._save_restart(atoms, current_step)
 
-            # Always save results and checkpoint every step (automatic saving)
-            self._save_results_json(uptake, interaction_energy, total_energy)
-            # Pass steps_in_this_run (1-indexed) to _save_checkpoint
-            self._save_checkpoint(atoms, iteration + 1)
-
-            # Write trajectory
-            numbers = atoms.numbers
-            positions = atoms.positions
-            cell = atoms.cell
-
-            # Rebuild a clean Atoms object without any outdated arrays
-            atoms_for_writing = Atoms(numbers=numbers, positions=positions,
-                        cell=cell, pbc=True)
-
-            traj_file = Path(self.output_dir) / f'traj_{self.P/bar:.5f}bar.xyz'
-            write(str(traj_file), atoms_for_writing, append=True)
+            if current_step % self.save_interval == 0:
+                self._save_history_checkpoint(atoms, current_step, self.Z_ads, interaction_E, e)
 
         print("--- Simulation finished. Performing final save. ---")
-        self._save_results_json(uptake, interaction_energy, total_energy)
+        total_steps_completed = iteration_offset + steps_to_run
+        self._save_restart(atoms, total_steps_completed)
         
-        # Save final checkpoint (already saved in the loop, but save again to ensure it's up to date)
-        if steps_to_run > 0:
-            # Pass steps_in_this_run (1-indexed) - this is the number of steps completed in this run
-            self._save_checkpoint(atoms, steps_to_run)
+        if total_steps_completed % self.save_interval != 0:
+            self._save_history_checkpoint(atoms, total_steps_completed, self.Z_ads, interaction_E, e)
+             
         self._print_statistics()

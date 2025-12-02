@@ -15,8 +15,12 @@ WORKDIR /app
 # Copy the current directory contents into the container
 COPY . /app
 
-# Install the current project
-RUN pip install . --break-system-packages
+# Set backend via build argument (defaults to mace-torch for backward compatibility)
+ARG MLIP_BACKEND=mace-torch
+ENV MLIP_BACKEND=${MLIP_BACKEND}
+
+# Install the current project with the specified backend
+RUN pip install ".[${MLIP_BACKEND}]" --break-system-packages
 
 # Default command to keep the container running or drop into a shell
 CMD ["/bin/bash"]

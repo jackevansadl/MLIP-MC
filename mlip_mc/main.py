@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import shutil
+import struct
 import traceback
 from pathlib import Path
 from typing import Union, List, Tuple, Dict, Any, Optional
@@ -24,7 +25,7 @@ from ase.io import read
 from ase.build import molecule
 from ase.units import bar
 
-# NOTE: We delay import of torch, fairchem, and other heavy libraries 
+# NOTE: We delay import of torch, fairchem/mace-torch, and other heavy libraries 
 # until inside the process to ensure CUDA environment variables take effect first.
 
 
@@ -37,6 +38,12 @@ if _cache_dir:
     MODEL_CACHE_ROOT = Path(_cache_dir).expanduser()
 else:
     MODEL_CACHE_ROOT = Path.home() / ".cache" / "mlip-mc"
+
+
+def _read_binary_log(log_path: str) -> List[Dict[str, Any]]:
+    """Read binary log file and return list of records."""
+    from mlip_mc.src.utilities import read_binary_log
+    return read_binary_log(log_path)
 
 
 def _copy_model_to_target(downloaded_path: str, target_path: str) -> str:
@@ -273,6 +280,81 @@ def _format_device_str(gpu_id: Union[int, str]) -> str:
     return f"GPU {gpu_id}" if isinstance(gpu_id, int) else "CPU"
 
 
+def _detect_backend() -> str:
+    """
+    Detect which MLIP backend is available.
+    
+    Returns
+    -------
+    str
+        'fairchem' or 'mace-torch', raises ImportError if neither is available
+    """
+    try:
+        import fairchem.core
+        return 'fairchem'
+    except ImportError:
+        pass
+    
+    try:
+        from mace.calculators import mace_mp
+        return 'mace-torch'
+    except ImportError:
+        pass
+    
+    raise ImportError(
+        "No MLIP backend found. Please install either:\n"
+        "  pip install mlip-mc[fairchem]\n"
+        "  pip install mlip-mc[mace-torch]"
+    )
+
+
+def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> Any:
+    """
+    Load an MLIP model using the appropriate backend.
+    
+    Parameters
+    ----------
+    model_path : str
+        Path to the model file (local path or HuggingFace repo)
+    device : str
+        Device to use ('cuda' or 'cpu')
+    backend : str, optional
+        Backend to use ('fairchem' or 'mace-torch'). If None, auto-detects.
+    
+    Returns
+    -------
+    Any
+        ASE calculator instance (FAIRChemCalculator or mace_mp)
+    """
+    if backend is None:
+        backend = _detect_backend()
+    
+    if backend == 'fairchem':
+        from fairchem.core import FAIRChemCalculator
+        from fairchem.core.units.mlip_unit import load_predict_unit
+        
+        predictor = load_predict_unit(model_path, device=device)
+        model = FAIRChemCalculator(predictor, task_name="odac")
+        return model
+    
+    elif backend == 'mace-torch':
+        from mace.calculators import mace_mp
+        
+        # MACE uses 'cuda' or 'cpu' for device, same as fairchem
+        # Convert device string if needed (should already be 'cuda' or 'cpu')
+        mace_device = device if device in ('cuda', 'cpu') else 'cpu'
+        
+        model = mace_mp(
+            model=model_path,
+            default_dtype="float64",
+            device=mace_device
+        )
+        return model
+    
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
+
+
 def run_single_pressure(
     P_bar: float,
     T: float,
@@ -285,7 +367,8 @@ def run_single_pressure(
     gpu_id: Union[int, str],
     result_queue: Queue,
     adsorbate_name: Optional[str] = None,
-    output_dir: str = 'results'
+    output_dir: str = 'results',
+    save_interval: int = 1000
 ) -> None:
     """
     Run GCMC simulation for a single pressure point on a specific GPU.
@@ -314,6 +397,8 @@ def run_single_pressure(
         Queue to return results
     output_dir : str, optional
         Directory to save results (default: 'results')
+    save_interval : int, optional
+        Interval for saving checkpoints (default: 1000)
     """
     try:
         # 1. Set Environment Variables for GPU Isolation
@@ -329,7 +414,7 @@ def run_single_pressure(
         if isinstance(gpu_id, int) and torch.cuda.is_available():
             # Even though we requested gpu_id, inside this process it will appear as cuda:0
             # because we masked the others with CUDA_VISIBLE_DEVICES
-            # IMPORTANT: fairchem strictly requires 'cuda' or 'cpu', not 'cuda:0'
+            # IMPORTANT: both backends require 'cuda' or 'cpu', not 'cuda:0'
             device = 'cuda' 
         else:
             device = 'cpu'
@@ -355,7 +440,6 @@ def run_single_pressure(
         # Load model on this GPU
         
         P = P_bar * bar
-        device_str = _format_device_str(gpu_id)
         print(f"  [{device_str}] Starting simulation at P = {P_bar:.2f} bar")
         
         # Calculate Fugacity using Peng-Robinson EOS
@@ -373,21 +457,6 @@ def run_single_pressure(
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
-        # Check if we're restarting (checkpoint files exist)
-        checkpoint_dir = os.path.join(output_dir, 'checkpoint')
-        restart_xyz = os.path.join(checkpoint_dir, f'restart_{P/bar:.5f}bar.xyz')
-        restart_json = os.path.join(checkpoint_dir, f'restart_{P/bar:.5f}bar.json')
-        is_restart = os.path.exists(restart_xyz) and os.path.exists(restart_json)
-
-        # Only remove trajectory file if NOT restarting (to allow appending on restart)
-        traj_file = os.path.join(output_dir, f'traj_{P/bar:.5f}bar.xyz')
-        if os.path.exists(traj_file) and not is_restart:
-            os.remove(traj_file)
-
-        # Restart is now automatic - checkpoint directory is always used
-        # Keep restart_prefix for backward compatibility (not used anymore, but kept for API)
-        restart_prefix = os.path.join(output_dir, f"restart_{P/bar:.5f}bar")
-
         # Run GCMC Simulation
         gcmc = MLP_GCMC(
             model=model,
@@ -400,18 +469,77 @@ def run_single_pressure(
             vdw_radii=vdw_radii,
             debug=False,
             output_dir=output_dir,
-            restart_prefix=restart_prefix,  # Kept for backward compatibility (not used)
             n_equilibration_steps=n_equilibration_steps,  # Total equilibration steps (target)
-            n_production_steps=n_production_steps  # Total production steps (target)
+            n_production_steps=n_production_steps,  # Total production steps (target)
+            save_interval=save_interval
         )
         
         print(f"  [{device_str}] Running {n_total_steps} steps...")
         gcmc.run(N=n_total_steps)
         
-        # Load and process results
-        results_file = os.path.join(output_dir, f"results_{P/bar:.5f}bar.json")
-        if os.path.exists(results_file):
-            with open(results_file, 'r') as f:
+        log_file_bin = os.path.join(output_dir, f"log_{P/bar:.5f}bar.bin")
+        results_file_npz = os.path.join(output_dir, f"results_{P/bar:.5f}bar.npz")
+        results_file_json = os.path.join(output_dir, f"results_{P/bar:.5f}bar.json")
+        
+        uptake_data = []
+        energy_data = []
+        
+        if os.path.exists(log_file_bin):
+            log_data = _read_binary_log(log_file_bin)
+            uptake_data = [d['uptake'] for d in log_data if d['step'] > n_equilibration_steps]
+            energy_data = [d['interaction_energy'] for d in log_data if d['step'] > n_equilibration_steps]
+            
+            if not uptake_data:
+                uptake_data = [d['uptake'] for d in log_data]
+                energy_data = [d['interaction_energy'] for d in log_data]
+            
+            if uptake_data:
+                avg_uptake = np.mean(uptake_data)
+                std_uptake = np.std(uptake_data)
+                avg_energy = np.mean([e for e in energy_data if e != 0]) if any(e != 0 for e in energy_data) else 0.0
+                
+                device_str = _format_device_str(gpu_id)
+                print(f"  [{device_str}] Completed P = {P_bar:.2f} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}")
+                
+                # Return results via queue
+                result_queue.put({
+                    'pressure': P_bar,
+                    'uptake': avg_uptake,
+                    'uptake_std': std_uptake,
+                    'energy': avg_energy
+                })
+            else:
+                 device_str = _format_device_str(gpu_id)
+                 print(f"  [{device_str}] Warning: No valid data found in log for P = {P_bar:.2f} bar")
+                 result_queue.put({
+                    'pressure': P_bar,
+                    'uptake': None,
+                    'uptake_std': None,
+                    'energy': None
+                 })
+                 
+        elif os.path.exists(results_file_npz):
+            data = np.load(results_file_npz)
+            uptake_data = data['uptake'][n_equilibration_steps:]
+            energy_data = data['interaction_energy'][n_equilibration_steps:]
+            data.close()
+            
+            avg_uptake = np.mean(uptake_data)
+            std_uptake = np.std(uptake_data)
+            avg_energy = np.mean([e for e in energy_data if e != 0]) if any(e != 0 for e in energy_data) else 0.0
+            
+            device_str = _format_device_str(gpu_id)
+            print(f"  [{device_str}] Completed P = {P_bar:.2f} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}")
+            
+            # Return results via queue
+            result_queue.put({
+                'pressure': P_bar,
+                'uptake': avg_uptake,
+                'uptake_std': std_uptake,
+                'energy': avg_energy
+            })
+        elif os.path.exists(results_file_json):
+            with open(results_file_json, 'r') as f:
                 results = json.load(f)
             
             uptake_data = results['uptake'][n_equilibration_steps:]
@@ -433,7 +561,7 @@ def run_single_pressure(
             })
         else:
             device_str = _format_device_str(gpu_id)
-            print(f"  [{device_str}] Warning: Results file not found: {results_file}")
+            print(f"  [{device_str}] Warning: Results file not found for P = {P_bar:.2f} bar")
             result_queue.put({
                 'pressure': P_bar,
                 'uptake': None,
@@ -470,9 +598,8 @@ def run_gcmc(
     n_production_steps: int = 20000,
     model_path: str = "models/model.pt",
     output_dir: str = 'results',
-    plot_isotherm: bool = True,
-    adsorbate_label: Optional[str] = None,
-    hf_token: Optional[str] = None
+    hf_token: Optional[str] = None,
+    save_interval: int = 1000
 ) -> Dict[str, Any]:
     """
     Run GCMC isotherm simulation for gas adsorption in a porous material.
@@ -502,12 +629,10 @@ def run_gcmc(
         Missing files are automatically downloaded from Hugging Face and cached.
     output_dir : str, optional
         Directory to save results (default: 'results')
-    plot_isotherm : bool, optional
-        Whether to generate and save isotherm plot (default: True)
-    adsorbate_label : str, optional
-        Label for adsorbate in plot title (default: inferred from file/molecule name)
     hf_token : str, optional
         Hugging Face authentication token. If None, uses cached token or prompts for login
+    save_interval : int, optional
+        Interval for saving checkpoints (default: 1000)
     
     Returns
     -------
@@ -524,20 +649,15 @@ def run_gcmc(
     _print_banner()
     _print_section_header("GCMC Isotherm Simulation")
     
-    # Set multiprocessing start method to 'spawn' for CUDA compatibility
-    # This must be done before creating any processes
     try:
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
-        # Context might already be set, try without force
         try:
             mp.set_start_method('spawn')
         except RuntimeError:
-            pass  # Already set, continue
+            pass
     
-    # Helper import for device counting in main process
     import torch
-    import matplotlib.pyplot as plt
 
     # Check available GPUs
     _print_subsection("Hardware Configuration")
@@ -552,10 +672,7 @@ def run_gcmc(
     
     model_path, hf_repo_id, hf_model_filename = _resolve_model_spec(model_path)
 
-    # 1. Load model (download from Hugging Face if not found locally)
     _print_subsection("Model Configuration")
-    
-    # Check cache directory first (for consistent caching across working directories)
     cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
     if os.path.exists(cache_path):
         model_path = str(cache_path)
@@ -563,7 +680,6 @@ def run_gcmc(
     elif not os.path.exists(model_path):
         _print_info("Model Status", f"Not found at {model_path}")
         _print_info("Action", "Downloading from Hugging Face Hub...")
-        # Try to download from Hugging Face
         try:
             model_path = download_model_from_huggingface(
                 model_path,
@@ -581,15 +697,12 @@ def run_gcmc(
     else:
         _print_info("Model Status", f"Found at {model_path}")
     
-    # 2. Load adsorbent (framework) structure
     _print_subsection("Structure Loading")
     if not os.path.exists(adsorbent_path):
         raise FileNotFoundError(f"Adsorbent file not found: {adsorbent_path}")
     
     _print_info("Adsorbent", f"Loading from {adsorbent_path}...")
     atoms_frame = read(adsorbent_path)
-    
-    # Ensure clean Atoms object (no calculator attached) for multiprocessing
     atoms_frame = Atoms(
         numbers=atoms_frame.numbers,
         positions=atoms_frame.positions,
@@ -597,40 +710,27 @@ def run_gcmc(
         pbc=atoms_frame.pbc
     )
     
-    # 3. Load or create adsorbate
     if adsorbate_path is not None:
         if not os.path.exists(adsorbate_path):
             raise FileNotFoundError(f"Adsorbate file not found: {adsorbate_path}")
         _print_info("Adsorbate", f"Loading from {adsorbate_path}...")
         atoms_ads = read(adsorbate_path)
         atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
-        if adsorbate_label is None:
-            adsorbate_label = os.path.basename(adsorbate_path).replace('.xyz', '').replace('.cif', '')
-        # Extract chemical formula from the loaded structure to match with fugacity table
-        # But if adsorbate_molecule is also provided, prioritize that for fugacity matching
         if adsorbate_molecule is not None:
-            # Both file and molecule provided: use molecule name for fugacity matching
             adsorbate_name = adsorbate_molecule
             _print_info("Adsorbate Name", adsorbate_name)
         else:
-            # Only file provided: extract formula from file
-            adsorbate_name = atoms_ads.get_chemical_formula()
-            # Normalize: remove spaces to match CSV format (e.g., "C O2" -> "CO2")
-            adsorbate_name = adsorbate_name.replace(' ', '')
+            adsorbate_name = atoms_ads.get_chemical_formula().replace(' ', '')
             _print_info("Adsorbate Name", f"{adsorbate_name} (extracted from file)")
     elif adsorbate_molecule is not None:
         _print_info("Adsorbate", f"Creating {adsorbate_molecule} molecule...")
         atoms_ads = molecule(adsorbate_molecule)
         atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
-        if adsorbate_label is None:
-            adsorbate_label = adsorbate_molecule
-        # Use the molecule name directly to match with fugacity table
         adsorbate_name = adsorbate_molecule
         _print_info("Adsorbate Name", adsorbate_name)
     else:
         raise ValueError("Either adsorbate_path or adsorbate_molecule must be provided")
     
-    # 4. Process pressure points
     if pressure_points is None:
         raise ValueError("pressure_points must be provided (float or list of floats)")
     
@@ -642,11 +742,9 @@ def run_gcmc(
     _print_info("Equilibration Steps", f"{n_equilibration_steps}")
     _print_info("Production Steps", f"{n_production_steps}")
     
-    # Calculate unit cell volume
-    cell_volume = np.linalg.det(atoms_frame.get_cell())  # A^3
-    cell_volume_cm3 = cell_volume * 1e-24  # Convert to cm^3
+    cell_volume = np.linalg.det(atoms_frame.get_cell())
+    cell_volume_cm3 = cell_volume * 1e-24
     
-    # 5. Distribute pressure points across GPUs
     _print_subsection("Simulation Execution")
     if n_gpus == 0:
         _print_warning("Running sequentially on CPU (no GPUs available)")
@@ -656,40 +754,49 @@ def run_gcmc(
         active_gpus = min(len(pressure_points), n_gpus)
         _print_info("Distribution", f"{len(pressure_points)} pressure point(s) across {active_gpus} of {n_gpus} GPU(s)")
     
-    # Create processes for parallel execution
     processes = []
     result_queue = Queue()
     n_total_steps = n_equilibration_steps + n_production_steps
+    max_concurrent = n_gpus if n_gpus > 0 else 1
     
-    # Distribute pressure points across GPUs (round-robin)
+    import time
+    active_processes = []
+    
     for i, P_bar in enumerate(pressure_points):
+        while len(active_processes) >= max_concurrent:
+            for p in active_processes[:]:
+                if not p.is_alive():
+                    p.join()
+                    active_processes.remove(p)
+            if len(active_processes) >= max_concurrent:
+                time.sleep(0.5)
+
         gpu_id = devices[i % len(devices)] if isinstance(devices[0], int) else 'cpu'
         
         p = Process(target=run_single_pressure, args=(
             P_bar, temperature, model_path, atoms_frame, atoms_ads,
             n_equilibration_steps, n_production_steps, n_total_steps,
-            gpu_id, result_queue, adsorbate_name, output_dir
+            gpu_id, result_queue, adsorbate_name, output_dir, save_interval
         ))
-        processes.append(p)
         p.start()
+        active_processes.append(p)
+        processes.append(p)
+        
         device_str = _format_device_str(gpu_id) if isinstance(gpu_id, int) else str(gpu_id).upper()
         _print_info("Started", f"P = {P_bar:.2f} bar on {device_str}")
     
-    # Wait for all processes to complete
     print(f"\n  Waiting for {len(processes)} simulation(s) to complete...")
     for p in processes:
-        p.join()
+        if p.is_alive():
+            p.join()
     
-    # Collect results
     print("\n  Collecting results...")
     results = []
     while not result_queue.empty():
         results.append(result_queue.get())
     
-    # Sort results by pressure
     results.sort(key=lambda x: x['pressure'])
     
-    # Extract data
     pressures = []
     uptakes = []
     uptake_stds = []
@@ -706,35 +813,6 @@ def run_gcmc(
             if 'error' in r:
                 print(f"    Error: {r['error']}", file=sys.stderr)
     
-    # 6. Plot Isotherm (if requested and we have data)
-    if plot_isotherm and len(pressures) > 0:
-        _print_subsection("Post-Processing")
-        print("  Generating isotherm plot...")
-        
-        plt.figure(figsize=(10, 6))
-        plt.errorbar(pressures, uptakes, yerr=uptake_stds, 
-                     marker='o', linestyle='-', linewidth=2, markersize=8,
-                     capsize=5, capthick=2, label='GCMC Simulation')
-        plt.xlabel('Pressure (bar)', fontsize=12)
-        plt.ylabel('Uptake (molecules/unit cell)', fontsize=12)
-        
-        title = f'{adsorbate_label} Adsorption Isotherm'
-        if hasattr(atoms_frame, 'get_chemical_symbols'):
-            title += f' in {atoms_frame.get_chemical_symbols()[0]} framework'
-        title += f' at {temperature} K'
-        plt.title(title, fontsize=14, fontweight='bold')
-        
-        plt.grid(True, alpha=0.3)
-        plt.legend(fontsize=11)
-        plt.tight_layout()
-        
-        # Save plot
-        os.makedirs(output_dir, exist_ok=True)
-        plot_filename = os.path.join(output_dir, 'isotherm.png')
-        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-        _print_success(f"Isotherm plot saved to {plot_filename}")
-    
-    # 7. Save data to JSON
     isotherm_data = {
         'temperature': temperature,
         'pressures': pressures,
@@ -756,7 +834,6 @@ def run_gcmc(
         json.dump(isotherm_data, f, indent=4)
     _print_success(f"Isotherm data saved to {isotherm_file}")
     
-    # 8. Print summary table
     if len(pressures) > 0:
         _print_section_header("Isotherm Summary")
         headers = ["Pressure (bar)", "Uptake (mol/uc)", "Std Dev", "Energy (eV)"]
@@ -768,13 +845,6 @@ def run_gcmc(
     _print_section_header("Simulation Complete")
     print(f"  Results saved to: {output_dir}/")
     print()
-    
-    # Show plot if in interactive environment
-    if plot_isotherm and len(pressures) > 0:
-        try:
-            plt.show()
-        except Exception:
-            print("  (Plot display not available in non-interactive environment)")
     
     return isotherm_data
 
@@ -798,24 +868,8 @@ Examples:
       --n-equil 10000 \\
       --n-prod 20000 \\
       --model models/model.pt \\
-      --output-dir my_results
-
-  # Single pressure point
-  python main.py \\
-      --adsorbent tests/zif8.xyz \\
-      --adsorbate-molecule CO2 \\
-      --temperature 298.0 \\
-      --pressures 1.0 \\
-      --n-equil 5000 \\
-      --n-prod 15000
-
-  # Skip plotting
-  python main.py \\
-      --adsorbent tests/zif8.xyz \\
-      --adsorbate-molecule CO2 \\
-      --temperature 298.0 \\
-      --pressures 1.0 \\
-      --no-plot
+      --output-dir my_results \\
+      --save-interval 1000
         """
     )
     
@@ -839,8 +893,8 @@ Examples:
                         help='Hugging Face authentication token (optional, uses cached token if available)')
     parser.add_argument('--output-dir', type=str, default='results',
                         help='Output directory for results (default: results)')
-    parser.add_argument('--no-plot', action='store_true',
-                        help='Skip generating isotherm plot')
+    parser.add_argument('--save-interval', type=int, default=1000,
+                        help='Interval for saving checkpoints (default: 1000)')
     
     return parser.parse_args()
 
@@ -908,8 +962,8 @@ def main() -> None:
             n_production_steps=args.n_prod,
             model_path=args.model,
             output_dir=args.output_dir,
-            plot_isotherm=not args.no_plot,
-            hf_token=args.hf_token
+            hf_token=args.hf_token,
+            save_interval=args.save_interval
         )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)
