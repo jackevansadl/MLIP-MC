@@ -300,6 +300,12 @@ def _detect_backend() -> str:
         return 'mace-torch'
     except ImportError:
         pass
+
+    try :
+        from nequip.ase.nequip_calculator import NequIPCalculator
+        return 'nequip'
+    except ImportError:
+        pass
     
     raise ImportError(
         "No MLIP backend found. Please install either:\n"
@@ -419,6 +425,10 @@ def run_single_pressure(
         else:
             device = 'cpu'
         
+        # 4. Detect backend and load model
+        backend = _detect_backend()
+        device_str = _format_device_str(gpu_id)
+        print(f"  [{device_str}] Using backend: {backend}")
 
         model = NequIPCalculator.from_deployed_model(model_path = model_path,
                                                     species_to_type_name = {"C" : "C",
