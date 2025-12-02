@@ -360,9 +360,15 @@ def run_single_pressure(
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
-        # Clean trajectory file if it exists (will be recreated with appended data)
+        # Check if we're restarting (checkpoint files exist)
+        checkpoint_dir = os.path.join(output_dir, 'checkpoint')
+        restart_xyz = os.path.join(checkpoint_dir, f'restart_{P/bar:.5f}bar.xyz')
+        restart_json = os.path.join(checkpoint_dir, f'restart_{P/bar:.5f}bar.json')
+        is_restart = os.path.exists(restart_xyz) and os.path.exists(restart_json)
+
+        # Only remove trajectory file if NOT restarting (to allow appending on restart)
         traj_file = os.path.join(output_dir, f'traj_{P/bar:.5f}bar.xyz')
-        if os.path.exists(traj_file):
+        if os.path.exists(traj_file) and not is_restart:
             os.remove(traj_file)
 
         # Restart is now automatic - checkpoint directory is always used
