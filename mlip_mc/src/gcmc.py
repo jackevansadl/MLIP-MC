@@ -112,7 +112,7 @@ class MLP_GCMC:
         }
         
         # Initialize binary log file path
-        self.log_file_path = Path(self.output_dir) / f"log_{self.P/bar:.5f}bar.bin"
+        self.log_file_path = Path(self.output_dir) / f"log_{self.P/bar:.2f}bar.bin"
 
 
     def _debug_print(self, message: str, accepted: bool) -> None:
@@ -238,14 +238,14 @@ class MLP_GCMC:
     def _get_restart_paths(self) -> Tuple[str, str]:
         """Get restart file paths."""
         restart_dir = os.path.join(self.output_dir, 'restart')
-        restart_xyz = os.path.join(restart_dir, f'restart_{self.P/bar:.5f}bar.xyz')
-        restart_json = os.path.join(restart_dir, f'restart_{self.P/bar:.5f}bar.json')
+        restart_xyz = os.path.join(restart_dir, f'restart_{self.P/bar:.2f}bar.xyz')
+        restart_json = os.path.join(restart_dir, f'restart_{self.P/bar:.2f}bar.json')
         return restart_xyz, restart_json
 
     def _save_history_checkpoint(self, atoms: Atoms, step: int, uptake: int, interaction_energy: float, total_energy: float) -> None:
         """Save a history checkpoint to checkpoints_{pressure}bar/checkpoint_{step} folder."""
         # Create parent folder for all checkpoints at this pressure
-        checkpoints_parent_dir = Path(self.output_dir) / f'checkpoints_{self.P/bar:.5f}bar'
+        checkpoints_parent_dir = Path(self.output_dir) / f'checkpoints_{self.P/bar:.2f}bar'
         checkpoints_parent_dir.mkdir(parents=True, exist_ok=True)
         
         # Create individual checkpoint folder inside the parent
@@ -442,7 +442,7 @@ class MLP_GCMC:
             'interaction_energy': interaction_energy,
             'total_energy': total_energy
         }
-        filename = Path(self.output_dir) / f"results_{self.P/bar:.5f}bar.json"
+        filename = Path(self.output_dir) / f"results_{self.P/bar:.2f}bar.json"
         with open(filename, 'w') as f:
             json.dump(results_data, f, indent=4)
 

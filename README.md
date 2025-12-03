@@ -31,6 +31,12 @@ pip install ".[fairchem]"
 pip install ".[mace-torch]"
 ```
 
+**With Orbital backend:**
+```bash
+# rocm install: pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
+pip install ".["orb-models"]"
+```
+
 **Development mode (includes test tooling):**
 ```bash
 pip install -e ".[BACKEND_OF_YOUR_CHOICE,dev]"

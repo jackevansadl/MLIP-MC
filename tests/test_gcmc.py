@@ -556,7 +556,7 @@ class TestGCMCRigorous:
             gcmc.run(steps)
             
             # Read results from JSON
-            filename = f"results/results_{fugacity_val/bar:.5f}bar.json"
+            filename = f"results/results_{fugacity_val/bar:.2f}bar.json"
             if not os.path.exists(filename):
                 return 0.0
                 

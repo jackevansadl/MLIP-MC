@@ -9,7 +9,6 @@ import os
 import sys
 import json
 import shutil
-import struct
 import traceback
 from pathlib import Path
 from typing import Union, List, Tuple, Dict, Any, Optional
@@ -230,14 +229,20 @@ def _print_table(headers, rows, width=70):
     print("└" + "─" * (total_width - 2) + "┘")
 
 
-def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str]:
+def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str, bool]:
     """
     Normalize the model argument into a local path plus (optional) Hugging Face filename.
 
     Returns
     -------
-    tuple[str, str, str]
-        (local_path, repo_id, hf_filename)
+    tuple[str, str, str, bool]
+        (local_path, repo_id, hf_filename, is_hf)
+        - local_path : normalized local filesystem path
+        - repo_id    : Hugging Face repo id if applicable (or DEFAULT_HF_REPO for
+                       legacy/local paths that may auto-download a fairchem model)
+        - hf_filename: filename within the repo
+        - is_hf      : True if the user explicitly requested an HF model via the
+                       ``hf://`` scheme, False otherwise
     """
     if not model_spec:
         model_spec = DEFAULT_LOCAL_MODEL
@@ -269,11 +274,14 @@ def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str]:
         hf_filename = hf_filename.lstrip("/")
         repo_id = repo_id.strip().strip("/")
         local_path = MODEL_CACHE_ROOT / repo_id / hf_filename
-        return str(local_path), repo_id, hf_filename
+        return str(local_path), repo_id, hf_filename, True
 
     basename = os.path.basename(model_spec)
     hf_filename = basename if basename else DEFAULT_HF_FILENAME
-    return model_spec, DEFAULT_HF_REPO, hf_filename
+    # For non-HF specs we keep DEFAULT_HF_REPO for potential fairchem
+    # auto-downloads, but mark is_hf = False so callers can restrict this
+    # behavior to appropriate backends.
+    return model_spec, DEFAULT_HF_REPO, hf_filename, False
 
 
 def _format_device_str(gpu_id: Union[int, str]) -> str:
@@ -288,7 +296,7 @@ def _detect_backend() -> str:
     Returns
     -------
     str
-        'fairchem' or 'mace-torch', raises ImportError if neither is available
+        'fairchem', 'mace-torch', or 'orb-models', raises ImportError if none is available
     """
     try:
         import fairchem.core
@@ -302,10 +310,18 @@ def _detect_backend() -> str:
     except ImportError:
         pass
     
+    try:
+        from orb_models.forcefield import pretrained
+        from orb_models.forcefield.calculator import ORBCalculator
+        return 'orb-models'
+    except ImportError:
+        pass
+    
     raise ImportError(
-        "No MLIP backend found. Please install either:\n"
+        "No MLIP backend found. Please install one of:\n"
         "  pip install mlip-mc[fairchem]\n"
-        "  pip install mlip-mc[mace-torch]"
+        "  pip install mlip-mc[mace-torch]\n"
+        "  pip install mlip-mc[orb-models]"
     )
 
 
@@ -316,16 +332,17 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> 
     Parameters
     ----------
     model_path : str
-        Path to the model file (local path or HuggingFace repo)
+        Path to the model file (local path or HuggingFace repo).
+        For ORB models, this should be the path to the weights checkpoint file.
     device : str
         Device to use ('cuda' or 'cpu')
     backend : str, optional
-        Backend to use ('fairchem' or 'mace-torch'). If None, auto-detects.
+        Backend to use ('fairchem', 'mace-torch', or 'orb-models'). If None, auto-detects.
     
     Returns
     -------
     Any
-        ASE calculator instance (FAIRChemCalculator or mace_mp)
+        ASE calculator instance (FAIRChemCalculator, mace_mp, or ORBCalculator)
     """
     if backend is None:
         backend = _detect_backend()
@@ -351,6 +368,32 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> 
             device=mace_device
         )
         return model
+    
+    elif backend == 'orb-models':
+        from orb_models.forcefield import pretrained
+        from orb_models.forcefield.calculator import ORBCalculator
+
+        # ORB models normally download pretrained weights automatically. We make
+        # ``weights_path`` optional so that:
+        #   - By default, pretrained.orb_v3_conservative_inf_omat(...) handles
+        #     downloading and caching.
+        #   - If the user provides ``--model some/orb/weights.pt`` and that file
+        #     exists, we pass it through as ``weights_path`` to override the
+        #     default checkpoint.
+        if model_path is not None and os.path.exists(model_path):
+            orbff = pretrained.orb_v3_conservative_inf_omat(
+                device=device,
+                precision="float32-high",
+                weights_path=model_path,
+            )
+        else:
+            orbff = pretrained.orb_v3_conservative_inf_omat(
+                device=device,
+                precision="float32-high",
+            )
+
+        calc = ORBCalculator(orbff, device=device)
+        return calc
     
     else:
         raise ValueError(f"Unknown backend: {backend}")
@@ -464,9 +507,9 @@ def run_single_pressure(
         print(f"  [{device_str}] Running {n_total_steps} steps...")
         gcmc.run(N=n_total_steps)
         
-        log_file_bin = os.path.join(output_dir, f"log_{P/bar:.5f}bar.bin")
-        results_file_npz = os.path.join(output_dir, f"results_{P/bar:.5f}bar.npz")
-        results_file_json = os.path.join(output_dir, f"results_{P/bar:.5f}bar.json")
+        log_file_bin = os.path.join(output_dir, f"log_{P/bar:.2f}bar.bin")
+        results_file_npz = os.path.join(output_dir, f"results_{P/bar:.2f}bar.npz")
+        results_file_json = os.path.join(output_dir, f"results_{P/bar:.2f}bar.json")
         
         uptake_data = []
         energy_data = []
@@ -657,32 +700,76 @@ def run_gcmc(
         n_gpus = 0
         _print_warning("No GPUs available, using CPU")
     
-    model_path, hf_repo_id, hf_model_filename = _resolve_model_spec(model_path)
+    # Detect backend once in the parent process so we can make backend-aware
+    # decisions about how to interpret model paths (e.g., which defaults or
+    # Hugging Face models are applicable).
+    backend = _detect_backend()
+
+    model_path, hf_repo_id, hf_model_filename, is_hf = _resolve_model_spec(model_path)
 
     _print_subsection("Model Configuration")
-    cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
-    if os.path.exists(cache_path):
-        model_path = str(cache_path)
-        _print_info("Model Status", f"Found in cache at {model_path}")
-    elif not os.path.exists(model_path):
-        _print_info("Model Status", f"Not found at {model_path}")
-        _print_info("Action", "Downloading from Hugging Face Hub...")
-        try:
-            model_path = download_model_from_huggingface(
-                model_path,
-                repo_id=hf_repo_id,
-                filename=hf_model_filename,
-                token=hf_token
-            )
-            _print_success(f"Model downloaded successfully to: {model_path}")
-        except Exception as e:
-            raise FileNotFoundError(
-                f"Model file not found at {model_path}\n"
-                f"Failed to download from Hugging Face: {e}\n"
-                "Please ensure the model file exists or check your Hugging Face authentication."
-            )
+
+    # Decide whether to use Hugging Face caching / auto-download logic.
+    #
+    # Rules:
+    #   - If the user explicitly requested an HF model (is_hf=True), always
+    #     honor that, regardless of backend.
+    #   - If the model path is a plain local path (is_hf=False), we only
+    #     auto-resolve to the default HF fairchem model for the *fairchem*
+    #     backend. Other backends (e.g., 'orb-models') will treat the path
+    #     as a normal local weights file and will *not* silently reuse the
+    #     cached fairchem checkpoint.
+    use_hf_cache = is_hf or (backend == 'fairchem')
+
+    if use_hf_cache:
+        cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
+        if os.path.exists(cache_path):
+            model_path = str(cache_path)
+            _print_info("Model Status", f"Found in cache at {model_path}")
+        elif not os.path.exists(model_path):
+            _print_info("Model Status", f"Not found at {model_path}")
+            _print_info("Action", "Downloading from Hugging Face Hub...")
+            try:
+                model_path = download_model_from_huggingface(
+                    model_path,
+                    repo_id=hf_repo_id,
+                    filename=hf_model_filename,
+                    token=hf_token
+                )
+                _print_success(f"Model downloaded successfully to: {model_path}")
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    f"Failed to download from Hugging Face: {e}\n"
+                    "Please ensure the model file exists or check your Hugging Face authentication."
+                )
+        else:
+            _print_info("Model Status", f"Found at {model_path}")
     else:
-        _print_info("Model Status", f"Found at {model_path}")
+        # Non-fairchem backends with a plain local path: do not transparently
+        # redirect to the default HF fairchem model.
+        if not os.path.exists(model_path):
+            # For orb-models the pretrained weights are fetched automatically,
+            # so a missing local path is not necessarily an error unless the
+            # user explicitly passed a (nonexistent) override. We keep the
+            # behavior simple: if the file is missing, we fall back to the
+            # default orb_models checkpoint logic.
+            if backend == 'orb-models':
+                _print_info(
+                    "Model Status",
+                    "Local model file not found; using orb-models pretrained checkpoint "
+                    "(weights will be downloaded/cached automatically).",
+                )
+                model_path = None
+            else:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    "For non-fairchem backends, please provide a valid local "
+                    "weights checkpoint path or an explicit Hugging Face model via "
+                    "the 'hf://' scheme."
+                )
+        else:
+            _print_info("Model Status", f"Using local model at {model_path}")
     
     _print_subsection("Structure Loading")
     if not os.path.exists(adsorbent_path):

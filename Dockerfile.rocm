@@ -6,18 +6,23 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Upgrade pip to the latest version
 RUN pip install --upgrade pip --break-system-packages --ignore-installed
 
-# Install PyTorch, TorchVision, and TorchAudio for ROCm 6.4
-RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4 --break-system-packages
+# Set backend via build argument (defaults to mace-torch for backward compatibility)
+ARG MLIP_BACKEND=fairchem-core
+ENV MLIP_BACKEND=${MLIP_BACKEND}
+
+# Install PyTorch, TorchVision, and TorchAudio for ROCm 6.4.
+# If MLIP_BACKEND is fairchem-core, pin specific versions; otherwise install latest.
+RUN if [ "$MLIP_BACKEND" = "fairchem-core" ]; then \
+        pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4 --break-system-packages; \
+    else \
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4; \
+    fi
 
 # Set the working directory
 WORKDIR /app
 
 # Copy the current directory contents into the container
 COPY . /app
-
-# Set backend via build argument (defaults to mace-torch for backward compatibility)
-ARG MLIP_BACKEND=mace-torch
-ENV MLIP_BACKEND=${MLIP_BACKEND}
 
 # Install the current project with the specified backend
 RUN pip install ".[${MLIP_BACKEND}]" --break-system-packages
