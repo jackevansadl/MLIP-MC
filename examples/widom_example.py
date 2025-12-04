@@ -25,7 +25,7 @@ def main() -> None:
     
     # Framework structure file (relative to this script or absolute path)
     example_dir = Path(__file__).resolve().parent
-    framework_path = example_dir / "ZIF8_CO2" / "ZIF8.xyz"
+    framework_path = example_dir / "ZIF8.xyz"
     
     # Adsorbate: either provide a path or molecule name
     adsorbate_path = None  # e.g., "path/to/adsorbate.xyz"

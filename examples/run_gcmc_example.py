@@ -16,7 +16,7 @@ from mlip_mc import run_gcmc
 
 def main() -> None:
     example_dir = Path(__file__).resolve().parent
-    framework_file = example_dir / "zif8.xyz"
+    framework_file = example_dir / "ZIF8.xyz"
     output_dir = example_dir / "results"
     output_dir.mkdir(exist_ok=True)
 
