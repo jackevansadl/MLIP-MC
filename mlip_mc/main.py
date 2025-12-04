@@ -923,6 +923,239 @@ def run_gcmc(
     return isotherm_data
 
 
+def run_widom(
+    adsorbent_path: str,
+    adsorbate_path: Optional[str] = None,
+    adsorbate_molecule: Optional[str] = None,
+    temperature: float = 298.0,
+    n_trials: int = 10000,
+    model_path: str = "models/model.pt",
+    output_dir: str = 'results',
+    hf_token: Optional[str] = None,
+    gpu_id: Union[int, str] = 0
+) -> Dict[str, Any]:
+    """
+    Run Widom insertion calculation for estimating Henry's constants and adsorption energies.
+    
+    Parameters
+    ----------
+    adsorbent_path : str
+        Path to adsorbent (framework) structure file (.xyz, .cif, or other ASE-readable format)
+    adsorbate_path : str, optional
+        Path to adsorbate molecule structure file (.xyz, .cif, etc.)
+        If None, adsorbate_molecule must be provided
+    adsorbate_molecule : str, optional
+        Name of molecule to build using ASE (e.g., 'CO2', 'CH4', 'H2O')
+        Used only if adsorbate_path is None
+    temperature : float, optional
+        Temperature in Kelvin (default: 298.0)
+    n_trials : int, optional
+        Number of Widom insertion trials (default: 10000)
+    model_path : str, optional
+        Path to MLIP model file (default: "models/model.pt").
+        Can be a local path or a Hugging Face repository name (e.g., "fengxuyoung/MLIP-MC").
+        Missing files are automatically downloaded from Hugging Face and cached.
+    output_dir : str, optional
+        Directory to save results (default: 'results')
+    hf_token : str, optional
+        Hugging Face authentication token. If None, uses cached token or prompts for login
+    gpu_id : int or str, optional
+        GPU device ID to use (int for GPU, 'cpu' for CPU, default: 0)
+    
+    Returns
+    -------
+    dict
+        Dictionary containing Widom results:
+        - 'temperature': temperature (K)
+        - 'attempts': total number of insertion attempts
+        - 'valid_insertions': number of valid insertions (no VDW overlap)
+        - 'vdw_overlaps': number of rejected insertions due to VDW overlap
+        - 'widom_adsorption_energy': weighted average adsorption energy (eV)
+        - 'arithmetic_adsorption_energy': arithmetic average adsorption energy (eV)
+        - 'average_boltzmann_factor': average Boltzmann factor
+        - 'raw_adsorption_energies': list of all interaction energies (eV)
+    """
+    _print_banner()
+    _print_section_header("Widom Insertion Calculation")
+    
+    import torch
+    from mlip_mc.src.widom import MLP_Widom
+    
+    # Check available GPUs
+    _print_subsection("Hardware Configuration")
+    if torch.cuda.is_available():
+        n_gpus = torch.cuda.device_count()
+        _print_info("GPUs Available", f"{n_gpus}")
+        for i in range(n_gpus):
+            _print_info(f"  GPU {i}", torch.cuda.get_device_name(i))
+    else:
+        n_gpus = 0
+        _print_warning("No GPUs available, using CPU")
+    
+    # Detect backend
+    backend = _detect_backend()
+    
+    model_path, hf_repo_id, hf_model_filename, is_hf = _resolve_model_spec(model_path)
+    
+    _print_subsection("Model Configuration")
+    
+    # Handle model caching/downloading
+    use_hf_cache = is_hf or (backend == 'fairchem')
+    
+    if use_hf_cache:
+        cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
+        if os.path.exists(cache_path):
+            model_path = str(cache_path)
+            _print_info("Model Status", f"Found in cache at {model_path}")
+        elif not os.path.exists(model_path):
+            _print_info("Model Status", f"Not found at {model_path}")
+            _print_info("Action", "Downloading from Hugging Face Hub...")
+            try:
+                model_path = download_model_from_huggingface(
+                    model_path,
+                    repo_id=hf_repo_id,
+                    filename=hf_model_filename,
+                    token=hf_token
+                )
+                _print_success(f"Model downloaded successfully to: {model_path}")
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    f"Failed to download from Hugging Face: {e}\n"
+                    "Please ensure the model file exists or check your Hugging Face authentication."
+                )
+        else:
+            _print_info("Model Status", f"Found at {model_path}")
+    else:
+        if not os.path.exists(model_path):
+            if backend == 'orb-models':
+                _print_info(
+                    "Model Status",
+                    "Local model file not found; using orb-models pretrained checkpoint "
+                    "(weights will be downloaded/cached automatically).",
+                )
+                model_path = None
+            else:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    "For non-fairchem backends, please provide a valid local "
+                    "weights checkpoint path or an explicit Hugging Face model via "
+                    "the 'hf://' scheme."
+                )
+        else:
+            _print_info("Model Status", f"Using local model at {model_path}")
+    
+    _print_subsection("Structure Loading")
+    if not os.path.exists(adsorbent_path):
+        raise FileNotFoundError(f"Adsorbent file not found: {adsorbent_path}")
+    
+    _print_info("Adsorbent", f"Loading from {adsorbent_path}...")
+    atoms_frame = read(adsorbent_path)
+    atoms_frame = Atoms(
+        numbers=atoms_frame.numbers,
+        positions=atoms_frame.positions,
+        cell=atoms_frame.cell,
+        pbc=atoms_frame.pbc
+    )
+    
+    if adsorbate_path is not None:
+        if not os.path.exists(adsorbate_path):
+            raise FileNotFoundError(f"Adsorbate file not found: {adsorbate_path}")
+        _print_info("Adsorbate", f"Loading from {adsorbate_path}...")
+        atoms_ads = read(adsorbate_path)
+        atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
+        adsorbate_name = atoms_ads.get_chemical_formula().replace(' ', '')
+        _print_info("Adsorbate Name", adsorbate_name)
+    elif adsorbate_molecule is not None:
+        _print_info("Adsorbate", f"Creating {adsorbate_molecule} molecule...")
+        atoms_ads = molecule(adsorbate_molecule)
+        atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
+        adsorbate_name = adsorbate_molecule
+        _print_info("Adsorbate Name", adsorbate_name)
+    else:
+        raise ValueError("Either adsorbate_path or adsorbate_molecule must be provided")
+    
+    _print_subsection("Simulation Parameters")
+    _print_info("Temperature", f"{temperature} K")
+    _print_info("Number of Trials", f"{n_trials}")
+    
+    cell_volume = np.linalg.det(atoms_frame.get_cell())
+    cell_volume_cm3 = cell_volume * 1e-24
+    _print_info("Unit Cell Volume", f"{cell_volume:.2f} Å³ ({cell_volume_cm3:.2e} cm³)")
+    
+    _print_subsection("Simulation Execution")
+    
+    # Set device
+    if isinstance(gpu_id, int) and gpu_id >= 0 and torch.cuda.is_available():
+        if gpu_id >= torch.cuda.device_count():
+            _print_warning(f"GPU {gpu_id} not available, using GPU 0")
+            gpu_id = 0
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        device = 'cuda'
+        device_str = f"GPU {gpu_id}"
+    else:
+        device = 'cpu'
+        device_str = "CPU"
+    
+    _print_info("Device", device_str)
+    _print_info("Backend", backend)
+    
+    # Load model
+    model = _load_model(model_path, device=device, backend=backend)
+    
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create Widom instance
+    widom = MLP_Widom(
+        model=model,
+        atoms_frame=atoms_frame,
+        atoms_ads=atoms_ads,
+        T=temperature,
+        device=device,
+        vdw_radii=vdw_radii,
+        output_dir=output_dir
+    )
+    
+    # Run simulation
+    print(f"\n  [{device_str}] Running {n_trials} Widom insertion trials...")
+    widom.run(N=n_trials)
+    
+    # Read results
+    results_file = os.path.join(output_dir, 'widom_results.json')
+    
+    widom_data = {}
+    if os.path.exists(results_file):
+        with open(results_file, 'r') as f:
+            widom_data = json.load(f)
+    else:
+        # Fallback: construct from widom stats
+        widom_data = {
+            'temperature': temperature,
+            'attempts': widom.stats['attempts'],
+            'valid_insertions': widom.stats['valid_insertions'],
+            'vdw_overlaps': widom.stats['vdw_overlaps']
+        }
+    
+    _print_section_header("Results Summary")
+    _print_info("Temperature", f"{widom_data.get('temperature', temperature)} K")
+    _print_info("Total Attempts", f"{widom_data.get('attempts', 0)}")
+    _print_info("Valid Insertions", f"{widom_data.get('valid_insertions', 0)}")
+    _print_info("VDW Overlaps", f"{widom_data.get('vdw_overlaps', 0)}")
+    
+    if 'widom_adsorption_energy' in widom_data:
+        _print_info("Widom Adsorption Energy", f"{widom_data['widom_adsorption_energy']:.5f} eV")
+        _print_info("Arithmetic Avg Energy", f"{widom_data['arithmetic_adsorption_energy']:.5f} eV")
+        _print_info("Avg Boltzmann Factor", f"{widom_data['average_boltzmann_factor']:.5e}")
+    
+    print()
+    _print_section_header("Simulation Complete")
+    print(f"  Results saved to: {output_dir}/")
+    print()
+    
+    return widom_data
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(

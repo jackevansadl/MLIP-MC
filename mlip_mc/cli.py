@@ -2,7 +2,8 @@
 """
 Command-line interface for MLIP-MC.
 
-This module provides the CLI entry point for running GCMC isotherm simulations.
+This module provides the CLI entry point for running GCMC isotherm simulations
+and Widom insertion calculations.
 """
 
 import sys
@@ -10,7 +11,7 @@ import argparse
 import multiprocessing as mp
 import traceback
 from typing import Union, List
-from .main import run_gcmc
+from .main import run_gcmc, run_widom
 
 
 def parse_pressures(pressure_str: str) -> Union[float, List[float]]:
@@ -47,8 +48,9 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Multiple pressure points
+  # GCMC: Multiple pressure points
   mlip_mc \\
+      --mode gcmc \\
       --adsorbent framework.xyz \\
       --adsorbate-molecule CO2 \\
       --temperature 298.0 \\
@@ -57,17 +59,29 @@ Examples:
       --n-prod 20000 \\
       --output-dir my_results
 
-  # Single pressure point
+  # GCMC: Single pressure point
   mlip_mc \\
+      --mode gcmc \\
       --adsorbent framework.xyz \\
       --adsorbate-molecule CO2 \\
       --temperature 298.0 \\
       --pressures 1.0 \\
       --n-equil 5000 \\
       --n-prod 15000
+
+  # Widom insertion
+  mlip_mc \\
+      --mode widom \\
+      --adsorbent framework.xyz \\
+      --adsorbate-molecule CO2 \\
+      --temperature 298.0 \\
+      --n-trials 10000 \\
+      --output-dir widom_results
         """
     )
     
+    parser.add_argument('--mode', type=str, default='gcmc', choices=['gcmc', 'widom'],
+                        help='Simulation mode: gcmc (Grand Canonical Monte Carlo) or widom (Widom insertion) (default: gcmc)')
     parser.add_argument('--adsorbent', type=str, required=True,
                         help='Path to adsorbent structure file (.xyz, .cif, etc.)')
     parser.add_argument('--adsorbate-path', type=str, default=None,
@@ -76,12 +90,14 @@ Examples:
                         help='Name of adsorbate molecule (e.g., CO2, CH4) if not using file')
     parser.add_argument('--temperature', type=float, required=True,
                         help='Temperature in Kelvin (required)')
-    parser.add_argument('--pressures', type=str, required=True,
-                        help='Comma-separated list of pressures in bar, or single number (required)')
+    parser.add_argument('--pressures', type=str, default=None,
+                        help='Comma-separated list of pressures in bar, or single number (required for GCMC mode)')
     parser.add_argument('--n-equil', type=int, default=10000,
-                        help='Number of equilibration steps (default: 10000)')
+                        help='Number of equilibration steps for GCMC (default: 10000)')
     parser.add_argument('--n-prod', type=int, default=20000,
-                        help='Number of production steps (default: 20000)')
+                        help='Number of production steps for GCMC (default: 20000)')
+    parser.add_argument('--n-trials', type=int, default=10000,
+                        help='Number of Widom insertion trials (default: 10000)')
     parser.add_argument('--model', type=str, default='models/model.pt',
                         help='Path to MLIP model file. Can be a local path or Hugging Face repo (e.g., fengxuyoung/MLIP-MC). Missing files auto-download and are cached.')
     parser.add_argument('--hf-token', type=str, default=None,
@@ -89,7 +105,9 @@ Examples:
     parser.add_argument('--output-dir', type=str, default='results',
                         help='Output directory for results (default: results)')
     parser.add_argument('--save-interval', type=int, default=1000,
-                        help='Interval for saving checkpoints (default: 1000)')
+                        help='Interval for saving checkpoints in GCMC mode (default: 1000)')
+    parser.add_argument('--gpu-id', type=int, default=0,
+                        help='GPU device ID to use (for Widom mode, default: 0, use -1 for CPU)')
     
     return parser.parse_args()
 
@@ -109,29 +127,54 @@ def main() -> None:
               file=sys.stderr)
         sys.exit(1)
     
-    # Parse pressure points
-    try:
-        pressure_points = parse_pressures(args.pressures)
-    except ValueError as e:
-        print(f"ERROR: Invalid pressure format: {args.pressures}", file=sys.stderr)
-        print("Please provide comma-separated numbers or a single number", file=sys.stderr)
-        sys.exit(1)
+    # Handle GPU ID for Widom mode
+    gpu_id = args.gpu_id if args.gpu_id >= 0 else 'cpu'
     
-    # Run simulation
+    # Run simulation based on mode
     try:
-        run_gcmc(
-            adsorbent_path=args.adsorbent,
-            adsorbate_path=args.adsorbate_path,
-            adsorbate_molecule=args.adsorbate_molecule,
-            temperature=args.temperature,
-            pressure_points=pressure_points,
-            n_equilibration_steps=args.n_equil,
-            n_production_steps=args.n_prod,
-            model_path=args.model,
-            output_dir=args.output_dir,
-            hf_token=args.hf_token,
-            save_interval=args.save_interval
-        )
+        if args.mode == 'widom':
+            # Widom insertion mode
+            if args.pressures is not None:
+                print("WARNING: --pressures is ignored in Widom mode", file=sys.stderr)
+            
+            run_widom(
+                adsorbent_path=args.adsorbent,
+                adsorbate_path=args.adsorbate_path,
+                adsorbate_molecule=args.adsorbate_molecule,
+                temperature=args.temperature,
+                n_trials=args.n_trials,
+                model_path=args.model,
+                output_dir=args.output_dir,
+                hf_token=args.hf_token,
+                gpu_id=gpu_id
+            )
+        else:
+            # GCMC mode
+            if args.pressures is None:
+                print("ERROR: --pressures is required for GCMC mode", file=sys.stderr)
+                sys.exit(1)
+            
+            # Parse pressure points
+            try:
+                pressure_points = parse_pressures(args.pressures)
+            except ValueError as e:
+                print(f"ERROR: Invalid pressure format: {args.pressures}", file=sys.stderr)
+                print("Please provide comma-separated numbers or a single number", file=sys.stderr)
+                sys.exit(1)
+            
+            run_gcmc(
+                adsorbent_path=args.adsorbent,
+                adsorbate_path=args.adsorbate_path,
+                adsorbate_molecule=args.adsorbate_molecule,
+                temperature=args.temperature,
+                pressure_points=pressure_points,
+                n_equilibration_steps=args.n_equil,
+                n_production_steps=args.n_prod,
+                model_path=args.model,
+                output_dir=args.output_dir,
+                hf_token=args.hf_token,
+                save_interval=args.save_interval
+            )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)
         traceback.print_exc()
