@@ -4,7 +4,7 @@ ASE framework for Monte Carlo simulations with universal Machine-Learned Interat
 
 ## Overview
 
-MLIP-MC is a Python package for performing Monte Carlo simulations of gas adsorption in porous materials using machine-learned interatomic potentials. The package integrates seamlessly with the ASE (Atomic Simulation Environment) framework and supports MLIP models from **FAIRChem**, **MACE-Torch** and **Orbital** backends.
+MLIP-MC is a Python package for performing Monte Carlo simulations of gas adsorption in porous materials using machine-learned interatomic potentials. The package integrates seamlessly with the ASE (Atomic Simulation Environment) framework and supports MLIP models from both **FAIRChem** and **MACE-Torch** backends.
 
 ## Installation
 
@@ -14,7 +14,6 @@ MLIP-MC supports two MLIP backends. You must install one of them:
 
 - **FAIRChem**: For models trained with FAIRChem (e.g., OC20, OC22 models)
 - **MACE-Torch**: For MACE models (e.g., MACE-MP models)
-- **Orbital**: For Orbital models (e.g. orb_v3_conservative_inf_omat)
 
 ### Quick Install
 
@@ -147,7 +146,7 @@ Simulations generate output files in the specified output directory (default: `r
 
 - **GCMC Isotherm (using `run_gcmc()`)**:
   - `isotherm_data.json`: Complete isotherm data (pressures, uptakes, energies, etc.)
-  - `log_{pressure}bar.bin`: Binary log file containing all iteration data (step, uptake, interaction_energy, total_energy)
+  - `log_{pressure}bar.bin`: Binary log file containing all iteration data with trajectory (step, uptake, interaction_energy, total_energy, atomic structure)
   - `restart/restart_{pressure}bar.xyz` and `.json`: Restart information (updated every step for crash recovery)
   - `checkpoints_{pressure}bar/checkpoint_{step}/`: History checkpoints saved at intervals specified by `--save-interval`
     - `traj.xyz`: Snapshot trajectory
@@ -219,4 +218,4 @@ Much of the code in this repository is based on or derived from the work publish
 
 Additional acknowledgments:
 - Built on the ASE framework
-- Supports MLIP models from FAIRChem, MACE-Torch and Orbital
+- Supports MLIP models from FAIRChem and MACE-Torch

@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 from ase import Atoms
 from ase.io import read, write
 from ase import units as ase_units
-from .utilities import _random_rotation, random_position, vdw_overlap
+from .utilities import random_position, vdw_overlap
 
 
 class MLP_Widom:

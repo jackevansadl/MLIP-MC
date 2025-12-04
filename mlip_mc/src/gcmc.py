@@ -230,10 +230,36 @@ class MLP_GCMC:
         
         return accepted
 
-    def _log_step_binary(self, step: int, uptake: int, interaction_energy: float, total_energy: float) -> None:
-        """Append a step record to the binary log file."""
+    def _log_step_binary(self, step: int, uptake: int, interaction_energy: float, total_energy: float, atoms: Atoms) -> None:
+        """Append a step record with trajectory data to the binary log file.
+        
+        Parameters
+        ----------
+        step : int
+            Step number
+        uptake : int
+            Number of adsorbed molecules
+        interaction_energy : float
+            Interaction energy in eV
+        total_energy : float
+            Total energy in eV
+        atoms : Atoms
+            Atomic structure to save
+        """
+        n_atoms = len(atoms)
+        numbers = atoms.numbers
+        positions = atoms.get_positions().flatten()
+        cell = atoms.get_cell().flatten()
+        
         with open(self.log_file_path, "ab") as f:
-            f.write(struct.pack("iidd", step, int(uptake), float(interaction_energy), float(total_energy)))
+            # Write header: step, uptake, interaction_energy, total_energy, n_atoms
+            f.write(struct.pack("iiddi", step, int(uptake), float(interaction_energy), float(total_energy), n_atoms))
+            # Write atomic numbers
+            f.write(struct.pack(f"{n_atoms}i", *numbers))
+            # Write positions (n_atoms * 3 doubles)
+            f.write(struct.pack(f"{n_atoms * 3}d", *positions))
+            # Write cell (3x3 = 9 doubles)
+            f.write(struct.pack("9d", *cell))
 
     def _get_restart_paths(self) -> Tuple[str, str]:
         """Get restart file paths."""
@@ -618,7 +644,7 @@ class MLP_GCMC:
                         self.moves['rotation']['accepted'] += 1
 
             current_step = iteration + 1 + iteration_offset
-            self._log_step_binary(current_step, self.Z_ads, interaction_E, e)
+            self._log_step_binary(current_step, self.Z_ads, interaction_E, e, atoms)
             self._save_restart(atoms, current_step)
 
             if current_step % self.save_interval == 0:

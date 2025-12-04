@@ -44,15 +44,14 @@ output_dir.mkdir(exist_ok=True, parents=True)
 # Save all structures as a single XYZ trajectory file
 print("\nSaving all structures as a single XYZ trajectory file...")
 traj_xyz = output_dir / 'widom_trajectory.xyz'
-for record in data:
-    write(str(traj_xyz), record['atoms'], append=True)
+all_atoms = [record['atoms'] for record in data]
+write(str(traj_xyz), all_atoms)
 print(f"  Saved: {traj_xyz} ({len(data)} structures)")
 
 # Save all structures as a single CIF trajectory file
 print("\nSaving all structures as a single CIF trajectory file...")
 traj_cif = output_dir / 'widom_trajectory.cif'
-for record in data:
-    write(str(traj_cif), record['atoms'], append=True)
+write(str(traj_cif), all_atoms)
 print(f"  Saved: {traj_cif} ({len(data)} structures)")
 
 print(f"\nAll trajectory files saved to: {output_dir}/")
