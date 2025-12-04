@@ -10,7 +10,7 @@ MLIP-MC is a Python package for performing Monte Carlo simulations of gas adsorp
 
 ### Backend Selection
 
-MLIP-MC supports two MLIP backends. You must install one of them:
+MLIP-MC supports three MLIP backends. You must install one of them:
 
 - **FAIRChem**: For models trained with FAIRChem (e.g., OC20, OC22 models)
 - **MACE-Torch**: For MACE models (e.g., MACE-MP models)
