@@ -30,6 +30,7 @@ def main() -> None:
         model_path="fengxuyoung/MLIP-MC",
         output_dir=str(output_dir),
         hf_token=None,
+        write_trajectory=True,
     )
 
     print("\nIsotherm summary:")

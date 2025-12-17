@@ -59,7 +59,8 @@ mlip_mc \\
     --pressures 0.1,0.5,1.0,2.0,5.0,10.0,20.0 \\
     --n-equil 10000 \\
     --n-prod 20000 \\
-    --output-dir results
+    --output-dir results \\
+    --write-trajectory
 ```
 
 #### Widom Insertion
@@ -88,6 +89,7 @@ mlip_mc \\
 - `--save-interval`: Interval for saving history checkpoints in GCMC (default: 1000)
 - `--model`: Path to MLIP model file. Can be a local path (default: `models/model.pt`) or a Hugging Face repository name like `fengxuyoung/MLIP-MC` (or `hf://fengxuyoung/MLIP-MC`). Missing files are automatically downloaded and cached. The model format should match your installed backend (FAIRChem `.pt` files or MACE `.model` files).
 - `--output-dir`: Output directory (default: results)
+- `--write-trajectory`: Specifies to write out simulation trajectory every `--save-interval` steps (default: False)
 - `--hf-token`: Hugging Face access token for downloading private models or bypassing interactive login (optional)
 - `--gpu-id`: GPU device ID to use (for Widom mode, default: 0, use -1 for CPU)
 
@@ -116,7 +118,8 @@ results = run_gcmc(
     n_equilibration_steps=10000,
     n_production_steps=20000,
     model_path="fengxuyoung/MLIP-MC",
-    output_dir="results"
+    output_dir="results",
+    write_trajectory=True
 )
 
 # Access results
@@ -147,7 +150,8 @@ Simulations generate output files in the specified output directory (default: `r
 
 - **GCMC Isotherm (using `run_gcmc()`)**:
   - `isotherm_data.json`: Complete isotherm data (pressures, uptakes, energies, etc.)
-  - `log_{pressure}bar.bin`: Binary log file containing all iteration data with trajectory (step, uptake, interaction_energy, total_energy, atomic structure)
+  - `log_{pressure}bar.bin`: Binary log file containing all iteration data with trajectory (step, uptake, interaction_energy, total_energy)
+  - `traj_{pressure}bar.xyz`: Simulation trajectory
   - `restart/restart_{pressure}bar.xyz` and `.json`: Restart information (updated every step for crash recovery)
   - `checkpoints_{pressure}bar/checkpoint_{step}/`: History checkpoints saved at intervals specified by `--save-interval`
     - `traj.xyz`: Snapshot trajectory
@@ -157,6 +161,7 @@ Simulations generate output files in the specified output directory (default: `r
   - `log_{pressure}bar.bin`: Binary log file with all iteration data
   - `restart/restart_{pressure}bar.xyz` and `.json`: Restart information
   - `checkpoints_{pressure}bar/checkpoint_{step}/`: History checkpoints
+  - `traj_{pressure}bar.xyz`: simulation trajectory
   
 - **Widom Insertion**:
   - `widom_results.json`: Adsorption energies and calculated properties (Henry's constant, weighted average energy, etc.)
