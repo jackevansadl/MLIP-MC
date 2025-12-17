@@ -63,7 +63,7 @@ class MLP_GCMC:
     potentials to study gas adsorption in porous materials.
     """
     
-    def __init__(self, model, atoms_frame, atoms_ads, T, P, fugacity, device, vdw_radii, debug=False, output_dir='results', restart_prefix=None, n_equilibration_steps=None, n_production_steps=None, save_interval=1000):
+    def __init__(self, model, atoms_frame, atoms_ads, T, P, fugacity, device, vdw_radii, debug=False, output_dir='results', restart_prefix=None, n_equilibration_steps=None, n_production_steps=None, save_interval=1000, write_trajectory=False):
         # Note: restart_prefix is kept for backward compatibility but not used
         self.model = model
         self.atoms_frame = atoms_frame
@@ -98,6 +98,7 @@ class MLP_GCMC:
         self.n_equilibration_steps = n_equilibration_steps  # Total equilibration steps (target)
         self.n_production_steps = n_production_steps  # Total production steps (target)
         self.save_interval = save_interval
+        self.write_trajectory = write_trajectory
         
         # Restart tracking (set when loading checkpoint)
         self._restart_n_equil_completed = 0
@@ -244,22 +245,26 @@ class MLP_GCMC:
         total_energy : float
             Total energy in eV
         atoms : Atoms
-            Atomic structure to save
+            Atomic structure at this step
         """
         n_atoms = len(atoms)
-        numbers = atoms.numbers
-        positions = atoms.get_positions().flatten()
-        cell = atoms.get_cell().flatten()
         
         with open(self.log_file_path, "ab") as f:
             # Write header: step, uptake, interaction_energy, total_energy, n_atoms
             f.write(struct.pack("iiddi", step, int(uptake), float(interaction_energy), float(total_energy), n_atoms))
-            # Write atomic numbers
-            f.write(struct.pack(f"{n_atoms}i", *numbers))
-            # Write positions (n_atoms * 3 doubles)
-            f.write(struct.pack(f"{n_atoms * 3}d", *positions))
-            # Write cell (3x3 = 9 doubles)
-            f.write(struct.pack("9d", *cell))
+
+    def _write_trajectory_xyz(self, atoms: Atoms) -> None:
+        """Append trajectory snapshot to XYZ file."""
+        numbers = atoms.numbers
+        positions = atoms.positions
+        cell = atoms.cell
+        
+        # ✅ rebuild a clean Atoms object without any outdated arrays
+        atoms_for_writing = Atoms(numbers=numbers, positions=positions,
+                                  cell=cell, pbc=True)
+        
+        traj_file = Path(self.output_dir) / f'traj_{self.P/bar:.2f}bar.xyz'
+        write(str(traj_file), atoms_for_writing, append=True)
 
     def _get_restart_paths(self) -> Tuple[str, str]:
         """Get restart file paths."""
@@ -644,11 +649,15 @@ class MLP_GCMC:
                         self.moves['rotation']['accepted'] += 1
 
             current_step = iteration + 1 + iteration_offset
-            self._log_step_binary(current_step, self.Z_ads, interaction_E, e, atoms)
-            self._save_restart(atoms, current_step)
 
             if current_step % self.save_interval == 0:
                 self._save_history_checkpoint(atoms, current_step, self.Z_ads, interaction_E, e)
+                self._log_step_binary(current_step, self.Z_ads, interaction_E, e, atoms)
+                self._save_restart(atoms, current_step)
+                if self.write_trajectory:
+                    self._write_trajectory_xyz(atoms)
+
+
 
         print("--- Simulation finished. Performing final save. ---")
         total_steps_completed = iteration_offset + steps_to_run

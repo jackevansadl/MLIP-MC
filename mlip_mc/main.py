@@ -412,7 +412,8 @@ def run_single_pressure(
     result_queue: Queue,
     adsorbate_name: Optional[str] = None,
     output_dir: str = 'results',
-    save_interval: int = 1000
+    save_interval: int = 1000,
+    write_trajectory: bool = False
 ) -> None:
     """
     Run GCMC simulation for a single pressure point on a specific GPU.
@@ -501,7 +502,8 @@ def run_single_pressure(
             output_dir=output_dir,
             n_equilibration_steps=n_equilibration_steps,  # Total equilibration steps (target)
             n_production_steps=n_production_steps,  # Total production steps (target)
-            save_interval=save_interval
+            save_interval=save_interval,
+            write_trajectory=write_trajectory
         )
         
         print(f"  [{device_str}] Running {n_total_steps} steps...")
@@ -629,7 +631,8 @@ def run_gcmc(
     model_path: str = "models/model.pt",
     output_dir: str = 'results',
     hf_token: Optional[str] = None,
-    save_interval: int = 1000
+    save_interval: int = 1000,
+    write_trajectory: bool = False
 ) -> Dict[str, Any]:
     """
     Run GCMC isotherm simulation for gas adsorption in a porous material.
@@ -699,7 +702,7 @@ def run_gcmc(
     else:
         n_gpus = 0
         _print_warning("No GPUs available, using CPU")
-    
+
     # Detect backend once in the parent process so we can make backend-aware
     # decisions about how to interpret model paths (e.g., which defaults or
     # Hugging Face models are applicable).
@@ -774,7 +777,7 @@ def run_gcmc(
     _print_subsection("Structure Loading")
     if not os.path.exists(adsorbent_path):
         raise FileNotFoundError(f"Adsorbent file not found: {adsorbent_path}")
-    
+
     _print_info("Adsorbent", f"Loading from {adsorbent_path}...")
     atoms_frame = read(adsorbent_path)
     atoms_frame = Atoms(
@@ -850,7 +853,7 @@ def run_gcmc(
         p = Process(target=run_single_pressure, args=(
             P_bar, temperature, model_path, atoms_frame, atoms_ads,
             n_equilibration_steps, n_production_steps, n_total_steps,
-            gpu_id, result_queue, adsorbate_name, output_dir, save_interval
+            gpu_id, result_queue, adsorbate_name, output_dir, save_interval, write_trajectory
         ))
         p.start()
         active_processes.append(p)
@@ -1202,7 +1205,8 @@ Examples:
                         help='Output directory for results (default: results)')
     parser.add_argument('--save-interval', type=int, default=1000,
                         help='Interval for saving checkpoints (default: 1000)')
-    
+    parser.add_argument('--write-trajectory', action='store_true',
+                        help='Write trajectory files')
     return parser.parse_args()
 
 
@@ -1256,7 +1260,8 @@ def main() -> None:
         print(f"ERROR: Invalid pressure format: {args.pressures}", file=sys.stderr)
         print("Please provide comma-separated numbers or a single number", file=sys.stderr)
         sys.exit(1)
-    
+
+
     # Run simulation
     try:
         run_gcmc(
@@ -1270,7 +1275,8 @@ def main() -> None:
             model_path=args.model,
             output_dir=args.output_dir,
             hf_token=args.hf_token,
-            save_interval=args.save_interval
+            save_interval=args.save_interval,
+            write_trajectory=args.write_trajectory
         )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)

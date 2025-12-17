@@ -108,7 +108,8 @@ Examples:
                         help='Interval for saving checkpoints in GCMC mode (default: 1000)')
     parser.add_argument('--gpu-id', type=int, default=0,
                         help='GPU device ID to use (for Widom mode, default: 0, use -1 for CPU)')
-    
+    parser.add_argument('--write-trajectory', action='store_true',
+                        help='Write trajectory files')
     return parser.parse_args()
 
 
@@ -173,7 +174,8 @@ def main() -> None:
                 model_path=args.model,
                 output_dir=args.output_dir,
                 hf_token=args.hf_token,
-                save_interval=args.save_interval
+                save_interval=args.save_interval,
+                write_trajectory=args.write_trajectory
             )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)
