@@ -63,7 +63,7 @@ class MLP_GCMC:
     potentials to study gas adsorption in porous materials.
     """
     
-    def __init__(self, model, atoms_frame, atoms_ads, T, P, fugacity, device, vdw_radii, debug=False, output_dir='results', restart_prefix=None, n_equilibration_steps=None, n_production_steps=None, save_interval=1000, write_trajectory=False):
+    def __init__(self, model, atoms_frame, atoms_ads, T, P, fugacity, device, vdw_radii, debug=False, output_dir='results', restart_prefix=None, n_equilibration_steps=None, n_production_steps=None, checkpoint_interval=10000, write_trajectory=False, trajectory_interval=100, overwrite_checkpoints=False):
         # Note: restart_prefix is kept for backward compatibility but not used
         self.model = model
         self.atoms_frame = atoms_frame
@@ -97,8 +97,10 @@ class MLP_GCMC:
         self.restart_prefix = restart_prefix  # Kept for backward compatibility (not used)
         self.n_equilibration_steps = n_equilibration_steps  # Total equilibration steps (target)
         self.n_production_steps = n_production_steps  # Total production steps (target)
-        self.save_interval = save_interval
+        self.checkpoint_interval = checkpoint_interval
         self.write_trajectory = write_trajectory
+        self.trajectory_interval = trajectory_interval
+        self.overwrite_checkpoints = overwrite_checkpoints
         
         # Restart tracking (set when loading checkpoint)
         self._restart_n_equil_completed = 0
@@ -273,14 +275,18 @@ class MLP_GCMC:
         restart_json = os.path.join(restart_dir, f'restart_{self.P/bar:.2f}bar.json')
         return restart_xyz, restart_json
 
-    def _save_history_checkpoint(self, atoms: Atoms, step: int, uptake: int, interaction_energy: float, total_energy: float) -> None:
+    def _save_history_checkpoint(self, atoms: Atoms, step: int, uptake: int, interaction_energy: float, total_energy: float, overwrite_checkpoints: bool) -> None:
         """Save a history checkpoint to checkpoints_{pressure}bar/checkpoint_{step} folder."""
         # Create parent folder for all checkpoints at this pressure
         checkpoints_parent_dir = Path(self.output_dir) / f'checkpoints_{self.P/bar:.2f}bar'
         checkpoints_parent_dir.mkdir(parents=True, exist_ok=True)
         
         # Create individual checkpoint folder inside the parent
-        checkpoint_dir = checkpoints_parent_dir / f'checkpoint_{step}'
+        if overwrite_checkpoints:
+            checkpoint_dir = checkpoints_parent_dir / f'checkpoint'
+        else:
+            checkpoint_dir = checkpoints_parent_dir / f'checkpoint_{step}'
+
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         # Clean atoms object (remove calculator)
@@ -546,7 +552,10 @@ class MLP_GCMC:
             iteration_offset = 0
         
         for iteration in range(steps_to_run):
+            success = False
             switch = np.random.rand()
+
+            # Insertion
             if switch < MOVE_PROBABILITIES['insertion']:
                 self.moves['insertion']['attempted'] += 1
                 self.Z_ads += 1
@@ -574,6 +583,7 @@ class MLP_GCMC:
                     e = e_trial
                     interaction_E = final_int_E
                     # self.moves['insertion']['accepted'] += 1
+                    success = True
                 else:
                     self.Z_ads -= 1
 
@@ -596,6 +606,7 @@ class MLP_GCMC:
                         e = e_trial
                         interaction_E = final_int_E
                         # self.moves['deletion']['accepted'] += 1
+                        success = True
                     else:
                         self.Z_ads += 1
 
@@ -621,6 +632,7 @@ class MLP_GCMC:
                         interaction_E = e_trial - framework_E - self.Z_ads * adsorbate_E
                         e = e_trial
                         self.moves['translation']['accepted'] += 1
+                        success = True
 
             # Rotation
             elif switch >= MOVE_PROBABILITIES['translation']:
@@ -647,15 +659,19 @@ class MLP_GCMC:
                         interaction_E = e_trial - framework_E - self.Z_ads * adsorbate_E
                         e = e_trial
                         self.moves['rotation']['accepted'] += 1
+                        success = True
 
             current_step = iteration + 1 + iteration_offset
 
-            if current_step % self.save_interval == 0:
-                self._save_history_checkpoint(atoms, current_step, self.Z_ads, interaction_E, e)
+            if success:
                 self._log_step_binary(current_step, self.Z_ads, interaction_E, e, atoms)
                 self._save_restart(atoms, current_step)
-                if self.write_trajectory:
-                    self._write_trajectory_xyz(atoms)
+
+            if current_step % self.checkpoint_interval == 0:
+                self._save_history_checkpoint(atoms, current_step, self.Z_ads, interaction_E, e, self.overwrite_checkpoints)
+
+            if current_step % self.trajectory_interval == 0 and self.write_trajectory:
+                self._write_trajectory_xyz(atoms)
 
 
 
@@ -663,7 +679,7 @@ class MLP_GCMC:
         total_steps_completed = iteration_offset + steps_to_run
         self._save_restart(atoms, total_steps_completed)
         
-        if total_steps_completed % self.save_interval != 0:
+        if total_steps_completed % self.checkpoint_interval != 0:
             self._save_history_checkpoint(atoms, total_steps_completed, self.Z_ads, interaction_E, e)
              
         self._print_statistics()

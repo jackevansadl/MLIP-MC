@@ -388,35 +388,12 @@ def read_binary_log(log_path: str) -> List[Dict[str, Any]]:
                 
                 step, uptake, interaction_energy, total_energy, n_atoms = struct.unpack("iiddi", header_bytes)
                 
-                # Read atomic numbers
-                numbers_bytes = f.read(n_atoms * 4)  # int = 4 bytes
-                if len(numbers_bytes) < n_atoms * 4:
-                    break
-                numbers = struct.unpack(f"{n_atoms}i", numbers_bytes)
-                
-                # Read positions (n_atoms * 3 doubles)
-                positions_bytes = f.read(n_atoms * 3 * 8)  # double = 8 bytes
-                if len(positions_bytes) < n_atoms * 3 * 8:
-                    break
-                positions_flat = struct.unpack(f"{n_atoms * 3}d", positions_bytes)
-                positions = np.array(positions_flat).reshape(n_atoms, 3)
-                
-                # Read cell (3x3 = 9 doubles)
-                cell_bytes = f.read(9 * 8)  # 9 doubles = 72 bytes
-                if len(cell_bytes) < 9 * 8:
-                    break
-                cell_flat = struct.unpack("9d", cell_bytes)
-                cell = np.array(cell_flat).reshape(3, 3)
-                
-                # Create Atoms object
-                atoms = Atoms(numbers=numbers, positions=positions, cell=cell, pbc=True)
-                
                 data.append({
                     'step': step,
                     'uptake': uptake,
                     'interaction_energy': interaction_energy,
                     'total_energy': total_energy,
-                    'atoms': atoms
+                    'n_atoms': n_atoms
                 })
     except FileNotFoundError:
         raise FileNotFoundError(f"Log file not found: {log_path}")

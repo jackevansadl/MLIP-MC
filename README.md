@@ -60,7 +60,9 @@ mlip_mc \\
     --n-equil 10000 \\
     --n-prod 20000 \\
     --output-dir results \\
-    --write-trajectory
+    --checkpoint-interval 10000 \\
+    --write-trajectory \\
+    --trajectory-interval 100
 ```
 
 #### Widom Insertion
@@ -86,12 +88,14 @@ mlip_mc \\
 - `--n-equil`: Number of equilibration steps for GCMC (default: 10000)
 - `--n-prod`: Number of production steps for GCMC (default: 20000)
 - `--n-trials`: Number of Widom insertion trials (default: 10000)
-- `--save-interval`: Interval for saving history checkpoints in GCMC (default: 1000)
+- `--checkpoint-interval`: Interval for saving history checkpoints in GCMC (default: 10000)
 - `--model`: Path to MLIP model file. Can be a local path (default: `models/model.pt`) or a Hugging Face repository name like `fengxuyoung/MLIP-MC` (or `hf://fengxuyoung/MLIP-MC`). Missing files are automatically downloaded and cached. The model format should match your installed backend (FAIRChem `.pt` files or MACE `.model` files).
 - `--output-dir`: Output directory (default: results)
-- `--write-trajectory`: Specifies to write out simulation trajectory every `--save-interval` steps (default: False)
+- `--write-trajectory`: Specifies to write out simulation trajectory every `--trajectory-interval` steps (default: False)
+- `--trajectory-interval`: Interval for saving structures into trajectory file (default: 100)
 - `--hf-token`: Hugging Face access token for downloading private models or bypassing interactive login (optional)
 - `--gpu-id`: GPU device ID to use (for Widom mode, default: 0, use -1 for CPU)
+- `overwrite_checkpoints`: Specifies to overwrite checkpoint files every `--checkpoint-interval` steps (default: False)
 
 **Model caching:** Hugging Face downloads are cached under `~/.cache/mlip-mc/<repo>/<filename>` (or a custom directory set via the `MLIP_MC_CACHE` environment variable). Subsequent runs reuse the cached file even when launched from different working directories.
 
@@ -119,7 +123,9 @@ results = run_gcmc(
     n_production_steps=20000,
     model_path="fengxuyoung/MLIP-MC",
     output_dir="results",
-    write_trajectory=True
+    write_trajectory=True,
+    trajectory_interval=100,
+    checkpoint_interval=10000
 )
 
 # Access results

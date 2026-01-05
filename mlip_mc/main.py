@@ -412,8 +412,10 @@ def run_single_pressure(
     result_queue: Queue,
     adsorbate_name: Optional[str] = None,
     output_dir: str = 'results',
-    save_interval: int = 1000,
-    write_trajectory: bool = False
+    checkpoint_interval: int = 10000,
+    write_trajectory: bool = False,
+    trajectory_interval: int = 100,
+    overwrite_checkpoints: bool = False,
 ) -> None:
     """
     Run GCMC simulation for a single pressure point on a specific GPU.
@@ -442,8 +444,14 @@ def run_single_pressure(
         Queue to return results
     output_dir : str, optional
         Directory to save results (default: 'results')
-    save_interval : int, optional
-        Interval for saving checkpoints (default: 1000)
+    checkpoint_interval : int, optional
+        Interval for saving checkpoints (default: 10000)
+    write_trajectory : flag, optional
+        If specified will output an ase atoms trajectory
+    trajectory_interval : int, optional
+        Interval for saving trajectory (default: 100)
+    overwrite_checkpoints : flag, optional
+        If specified will overwrite previous checkpoints when writing new checkpoint
     """
     try:
         # 1. Set Environment Variables for GPU Isolation
@@ -502,8 +510,10 @@ def run_single_pressure(
             output_dir=output_dir,
             n_equilibration_steps=n_equilibration_steps,  # Total equilibration steps (target)
             n_production_steps=n_production_steps,  # Total production steps (target)
-            save_interval=save_interval,
-            write_trajectory=write_trajectory
+            checkpoint_interval=checkpoint_interval,
+            write_trajectory=write_trajectory,
+            trajectory_interval=trajectory_interval,
+            overwrite_checkpoints=overwrite_checkpoints
         )
         
         print(f"  [{device_str}] Running {n_total_steps} steps...")
@@ -631,8 +641,10 @@ def run_gcmc(
     model_path: str = "models/model.pt",
     output_dir: str = 'results',
     hf_token: Optional[str] = None,
-    save_interval: int = 1000,
-    write_trajectory: bool = False
+    checkpoint_interval: int = 10000,
+    write_trajectory: bool = False,
+    trajectory_interval : int = 100,
+    overwrite_checkpoints : bool = False
 ) -> Dict[str, Any]:
     """
     Run GCMC isotherm simulation for gas adsorption in a porous material.
@@ -664,7 +676,7 @@ def run_gcmc(
         Directory to save results (default: 'results')
     hf_token : str, optional
         Hugging Face authentication token. If None, uses cached token or prompts for login
-    save_interval : int, optional
+    checkpoint_interval : int, optional
         Interval for saving checkpoints (default: 1000)
     
     Returns
@@ -853,7 +865,8 @@ def run_gcmc(
         p = Process(target=run_single_pressure, args=(
             P_bar, temperature, model_path, atoms_frame, atoms_ads,
             n_equilibration_steps, n_production_steps, n_total_steps,
-            gpu_id, result_queue, adsorbate_name, output_dir, save_interval, write_trajectory
+            gpu_id, result_queue, adsorbate_name, output_dir, checkpoint_interval, 
+            write_trajectory, trajectory_interval, overwrite_checkpoints
         ))
         p.start()
         active_processes.append(p)
@@ -1203,9 +1216,13 @@ Examples:
                         help='Hugging Face authentication token (optional, uses cached token if available)')
     parser.add_argument('--output-dir', type=str, default='results',
                         help='Output directory for results (default: results)')
-    parser.add_argument('--save-interval', type=int, default=1000,
-                        help='Interval for saving checkpoints (default: 1000)')
+    parser.add_argument('--checkpoint-interval', type=int, default=10000,
+                        help='Interval for saving checkpoints (default: 10000)')
     parser.add_argument('--write-trajectory', action='store_true',
+                        help='Write trajectory files')
+    parser.add_argument('--trajectory-interval', type=int, default=100,
+                        help='Interval for writing structures (default: 100)')
+    parser.add_argument('--overwrite-checkpoints', action='store_true',
                         help='Write trajectory files')
     return parser.parse_args()
 
@@ -1275,8 +1292,10 @@ def main() -> None:
             model_path=args.model,
             output_dir=args.output_dir,
             hf_token=args.hf_token,
-            save_interval=args.save_interval,
-            write_trajectory=args.write_trajectory
+            checkpoint_interval=args.checkpoint_interval,
+            write_trajectory=args.write_trajectory,
+            trajectory_interval=args.trajectory_interval,
+            overwrite_checkpoints = args.overwrite_checkpoints
         )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)
