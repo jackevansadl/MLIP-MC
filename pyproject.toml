@@ -23,6 +23,7 @@ dependencies = ["molmod==1.4.8", "numpy==1.26.4", "Cython==0.29.37", "nequip==0.
 dev = ["pytest"]
 fairchem = ["fairchem-core"]
 mace-torch = ["mace-torch"]
+orb-models = ["orb-models"]
 
 [project.scripts]
 mlip_mc = "mlip_mc.cli:main"

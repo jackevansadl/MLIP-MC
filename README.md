@@ -4,7 +4,7 @@ ASE framework for Monte Carlo simulations with universal Machine-Learned Interat
 
 ## Overview
 
-MLIP-MC is a Python package for performing Monte Carlo simulations of gas adsorption in porous materials using machine-learned interatomic potentials. The package integrates seamlessly with the ASE (Atomic Simulation Environment) framework and supports MLIP models from both **FAIRChem** and **MACE-Torch** backends. This branch supports the molmod models that this software was based on.
+MLIP-MC is a Python package for performing Monte Carlo simulations of gas adsorption in porous materials using machine-learned interatomic potentials. The package integrates seamlessly with the ASE (Atomic Simulation Environment) framework and supports MLIP models from **FAIRChem**, **MACE-Torch** and **Orbital** backends.
 
 ## Installation
 
@@ -26,31 +26,57 @@ pip install .
 
 ## Usage
 
+### Command-Line Interface
+
+#### GCMC Isotherm Simulation
+
 ```bash
-# multiple pressure points (auto-distributed across GPUs)
+# Multiple pressure points (auto-distributed across GPUs)
 mlip_mc \\
+    --mode gcmc \\
     --adsorbent framework.xyz \\
     --adsorbate-molecule CO2 \\
     --temperature 298.0 \\
     --pressures 0.1,0.5,1.0,2.0,5.0,10.0,20.0 \\
     --n-equil 10000 \\
     --n-prod 20000 \\
-    --save-interval 1000 \\
-    --output-dir results
+    --output-dir results \\
+    --checkpoint-interval 10000 \\
+    --write-trajectory \\
+    --trajectory-interval 100
+```
+
+#### Widom Insertion
+
+```bash
+# Basic Widom insertion calculation
+mlip_mc \\
+    --mode widom \\
+    --adsorbent framework.xyz \\
+    --adsorbate-molecule CO2 \\
+    --temperature 298.0 \\
+    --n-trials 10000 \\
+    --output-dir widom_results
 ```
 
 **Command-Line Arguments:**
+- `--mode`: Simulation mode: `gcmc` (Grand Canonical Monte Carlo) or `widom` (Widom insertion) (default: `gcmc`)
 - `--adsorbent`: Path to adsorbent structure file (.xyz, .cif, etc.) **(required)**
 - `--adsorbate-path`: Path to adsorbate structure file (optional). The chemical formula will be automatically extracted to match with the fugacity table.
 - `--adsorbate-molecule`: Molecule name (e.g., CO2, CH4) if not using file. This name will be used to match with the fugacity table.
 - `--temperature`: Temperature in Kelvin **(required)**
-- `--pressures`: Comma-separated pressures in bar, or single number **(required)**
-- `--n-equil`: Number of equilibration steps (default: 10000)
-- `--n-prod`: Number of production steps (default: 20000)
-- `--save-interval`: Interval for saving history checkpoints (default: 1000)
-- `--model`: Path to MLIP model file. Can be a local path (default: `models/model.pt`) or a Hugging Face repository name like `fengxuyoung/MLIP-MC` (or `hf://fengxuyoung/MLIP-MC`). Missing files are automatically downloaded and cached. The model format should match your installed backend (nequip `.pth` files).
+- `--pressures`: Comma-separated pressures in bar, or single number **(required for GCMC mode)**
+- `--n-equil`: Number of equilibration steps for GCMC (default: 10000)
+- `--n-prod`: Number of production steps for GCMC (default: 20000)
+- `--n-trials`: Number of Widom insertion trials (default: 10000)
+- `--checkpoint-interval`: Interval for saving history checkpoints in GCMC (default: 10000)
+- `--model`: Path to MLIP model file. Can be a local path (default: `models/model.pt`) or a Hugging Face repository name like `fengxuyoung/MLIP-MC` (or `hf://fengxuyoung/MLIP-MC`). Missing files are automatically downloaded and cached. The model format should match your installed backend (FAIRChem `.pt` files or MACE `.model` files).
 - `--output-dir`: Output directory (default: results)
-- `--hf-token`: Hugging Face access token for downloading private models or bypassing interactive login
+- `--write-trajectory`: Specifies to write out simulation trajectory every `--trajectory-interval` steps (default: False)
+- `--trajectory-interval`: Interval for saving structures into trajectory file (default: 100)
+- `--hf-token`: Hugging Face access token for downloading private models or bypassing interactive login (optional)
+- `--gpu-id`: GPU device ID to use (for Widom mode, default: 0, use -1 for CPU)
+- `overwrite_checkpoints`: Specifies to overwrite checkpoint files every `--checkpoint-interval` steps (default: False)
 
 **Model caching:** Hugging Face downloads are cached under `~/.cache/mlip-mc/<repo>/<filename>` (or a custom directory set via the `MLIP_MC_CACHE` environment variable). Subsequent runs reuse the cached file even when launched from different working directories.
 
@@ -61,7 +87,49 @@ mlip_mc \\
 
 ### Python Interface
 
-You can also use the package programmatically, see example ./examples/ZIF8_CO2/run_gcmc_example.py
+You can also use the package programmatically for more control and integration into your workflows:
+
+#### GCMC Isotherm
+
+```python
+from mlip_mc import run_gcmc
+
+# Run GCMC simulation
+results = run_gcmc(
+    adsorbent_path="framework.xyz",
+    adsorbate_molecule="CO2",
+    temperature=298.0,
+    pressure_points=[0.1, 1.0, 5.0],
+    n_equilibration_steps=10000,
+    n_production_steps=20000,
+    model_path="fengxuyoung/MLIP-MC",
+    output_dir="results",
+    write_trajectory=True,
+    trajectory_interval=100,
+    checkpoint_interval=10000
+)
+
+# Access results
+print(f"Pressures: {results['pressures']}")
+print(f"Uptakes: {results['uptakes']}")
+print(f"Temperature: {results['temperature']} K")
+```
+
+#### Widom Insertion
+
+```python
+from mlip_mc import run_widom
+
+# Run Widom insertion calculation
+results = run_widom(
+    adsorbent_path="framework.xyz",
+    adsorbate_molecule="CO2",
+    temperature=298.0,
+    n_trials=10000,
+    model_path="",
+    output_dir="widom_results"
+)
+```
 
 ## Output Files
 
@@ -69,7 +137,8 @@ Simulations generate output files in the specified output directory (default: `r
 
 - **GCMC Isotherm (using `run_gcmc()`)**:
   - `isotherm_data.json`: Complete isotherm data (pressures, uptakes, energies, etc.)
-  - `log_{pressure}bar.bin`: Binary log file containing all iteration data (step, uptake, interaction_energy, total_energy)
+  - `log_{pressure}bar.bin`: Binary log file containing all iteration data with trajectory (step, uptake, interaction_energy, total_energy)
+  - `traj_{pressure}bar.xyz`: Simulation trajectory
   - `restart/restart_{pressure}bar.xyz` and `.json`: Restart information (updated every step for crash recovery)
   - `checkpoints_{pressure}bar/checkpoint_{step}/`: History checkpoints saved at intervals specified by `--save-interval`
     - `traj.xyz`: Snapshot trajectory
@@ -79,10 +148,13 @@ Simulations generate output files in the specified output directory (default: `r
   - `log_{pressure}bar.bin`: Binary log file with all iteration data
   - `restart/restart_{pressure}bar.xyz` and `.json`: Restart information
   - `checkpoints_{pressure}bar/checkpoint_{step}/`: History checkpoints
+  - `traj_{pressure}bar.xyz`: simulation trajectory
   
-- **Widom**:
-  - `widom_results.json`: Adsorption energies and calculated properties
-  - `widom_traj.xyz`: Trajectory of valid insertions
+- **Widom Insertion**:
+  - `widom_results.json`: Adsorption energies and calculated properties (Henry's constant, weighted average energy, etc.)
+  - `log_widom.bin`: Binary log file containing all valid insertions with trajectory data (trial number, adsorption energy, total energy, atomic structure) - one record per valid insertion
+  - `widom_trajectory.xyz`: Last valid insertion structure saved at the end of simulation
+  - `restart/restart_widom.xyz` and `.json`: Restart information (updated every step for crash recovery)
 
 ### Isotherm Data Format
 
@@ -105,13 +177,11 @@ The `isotherm_data.json` file contains:
 ## Supported Compounds
 
 The Peng-Robinson EOS supports the following compounds (via `PREOS.from_name()`):
-- NH3 (ammonia)
-- Ar (argon)
-- C6H6 (benzene)
-- CO2 (carbon dioxide)
-- CH4 (methane)
-- N2 (nitrogen)
-- H2O (water)
+
+`H2 (hydrogen)`    `He (helium)`        `NH3 (ammonia)`      `H2O (water)`  
+`CH4 (methane)`    `N2 (nitrogen)`      `O2 (oxygen)`        `Ar (argon)`  
+`CO (carbon monoxide)` `CO2 (carbon dioxide)` `C2H2 (acetylene)`  `C2H6 (ethane)`  
+`C3H8 (propane)`   `C4H10 (butane)`     `C6H6 (benzene)`     `C6H14 (n-hexane)`
 
 ## Citation
 

@@ -348,7 +348,7 @@ class PREOS(EOS):
 
 def read_binary_log(log_path: str) -> List[Dict[str, Any]]:
     """
-    Read binary log file from GCMC simulation and return list of records.
+    Read binary log file from GCMC simulation and return list of records with trajectory data.
     
     Parameters
     ----------
@@ -363,6 +363,7 @@ def read_binary_log(log_path: str) -> List[Dict[str, Any]]:
         - 'uptake': int - number of adsorbed molecules
         - 'interaction_energy': float - interaction energy in eV
         - 'total_energy': float - total energy in eV
+        - 'atoms': Atoms - atomic structure (framework + adsorbates)
         
     Examples
     --------
@@ -370,23 +371,107 @@ def read_binary_log(log_path: str) -> List[Dict[str, Any]]:
     >>> data = read_binary_log('results/log_0.10000bar.bin')
     >>> print(f"Total steps: {len(data)}")
     >>> print(f"Average uptake: {np.mean([r['uptake'] for r in data]):.2f}")
+    >>> # Access trajectory
+    >>> first_structure = data[0]['atoms']
     """
+    from ase import Atoms
+    
     data = []
-    # Format: step (int 4), uptake (int 4), interaction_energy (double 8), total_energy (double 8) -> 24 bytes
-    record_size = 24
     
     try:
         with open(log_path, "rb") as f:
             while True:
-                bytes_read = f.read(record_size)
-                if not bytes_read or len(bytes_read) < record_size:
+                # Read header: step, uptake, interaction_energy, total_energy, n_atoms
+                header_bytes = f.read(struct.calcsize("iiddi"))
+                if len(header_bytes) < struct.calcsize("iiddi"):
                     break
-                step, uptake, interaction_energy, total_energy = struct.unpack("iidd", bytes_read)
+                
+                step, uptake, interaction_energy, total_energy, n_atoms = struct.unpack("iiddi", header_bytes)
+                
                 data.append({
                     'step': step,
                     'uptake': uptake,
                     'interaction_energy': interaction_energy,
-                    'total_energy': total_energy
+                    'total_energy': total_energy,
+                    'n_atoms': n_atoms
+                })
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Log file not found: {log_path}")
+    except Exception as e:
+        raise ValueError(f"Error reading binary log {log_path}: {e}")
+    
+    return data
+
+
+def read_widom_binary_log(log_path: str) -> List[Dict[str, Any]]:
+    """
+    Read binary log file from Widom insertion simulation and return list of records with trajectory data.
+    
+    Parameters
+    ----------
+    log_path : str
+        Path to the binary log file (e.g., 'results/log_widom.bin')
+        
+    Returns
+    -------
+    List[Dict[str, Any]]
+        List of dictionaries, each containing:
+        - 'trial': int - trial number
+        - 'adsorption_energy': float - adsorption (interaction) energy in eV
+        - 'total_energy': float - total energy in eV
+        - 'atoms': Atoms - atomic structure (framework + adsorbate)
+        
+    Examples
+    --------
+    >>> from mlip_mc.src.utilities import read_widom_binary_log
+    >>> data = read_widom_binary_log('results/log_widom.bin')
+    >>> print(f"Total valid insertions: {len(data)}")
+    >>> print(f"First insertion energy: {data[0]['adsorption_energy']:.4f} eV")
+    >>> # Access trajectory
+    >>> first_structure = data[0]['atoms']
+    """
+    from ase import Atoms
+    
+    data = []
+    
+    try:
+        with open(log_path, "rb") as f:
+            while True:
+                # Read header: trial, adsorption_energy, total_energy, n_atoms
+                header_bytes = f.read(struct.calcsize("iddi"))
+                if len(header_bytes) < struct.calcsize("iddi"):
+                    break
+                
+                trial, adsorption_energy, total_energy, n_atoms = struct.unpack("iddi", header_bytes)
+                
+                # Read atomic numbers
+                numbers_bytes = f.read(n_atoms * 4)  # int = 4 bytes
+                if len(numbers_bytes) < n_atoms * 4:
+                    break
+                numbers = struct.unpack(f"{n_atoms}i", numbers_bytes)
+                
+                # Read positions (n_atoms * 3 doubles)
+                positions_bytes = f.read(n_atoms * 3 * 8)  # double = 8 bytes
+                if len(positions_bytes) < n_atoms * 3 * 8:
+                    break
+                positions_flat = struct.unpack(f"{n_atoms * 3}d", positions_bytes)
+                positions = np.array(positions_flat).reshape(n_atoms, 3)
+                
+                # Read cell (3x3 = 9 doubles)
+                cell_bytes = f.read(9 * 8)  # 9 doubles = 72 bytes
+                if len(cell_bytes) < 9 * 8:
+                    break
+                cell_flat = struct.unpack("9d", cell_bytes)
+                cell = np.array(cell_flat).reshape(3, 3)
+                
+                # Create Atoms object
+                atoms = Atoms(numbers=numbers, positions=positions, cell=cell, pbc=True)
+                
+                data.append({
+                    'trial': trial,
+                    'adsorption_energy': adsorption_energy,
+                    'total_energy': total_energy,
+                    'atoms': atoms
                 })
     except FileNotFoundError:
         raise FileNotFoundError(f"Log file not found: {log_path}")

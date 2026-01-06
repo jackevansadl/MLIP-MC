@@ -9,7 +9,6 @@ import os
 import sys
 import json
 import shutil
-import struct
 import traceback
 from pathlib import Path
 from typing import Union, List, Tuple, Dict, Any, Optional
@@ -230,14 +229,20 @@ def _print_table(headers, rows, width=70):
     print("└" + "─" * (total_width - 2) + "┘")
 
 
-def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str]:
+def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str, bool]:
     """
     Normalize the model argument into a local path plus (optional) Hugging Face filename.
 
     Returns
     -------
-    tuple[str, str, str]
-        (local_path, repo_id, hf_filename)
+    tuple[str, str, str, bool]
+        (local_path, repo_id, hf_filename, is_hf)
+        - local_path : normalized local filesystem path
+        - repo_id    : Hugging Face repo id if applicable (or DEFAULT_HF_REPO for
+                       legacy/local paths that may auto-download a fairchem model)
+        - hf_filename: filename within the repo
+        - is_hf      : True if the user explicitly requested an HF model via the
+                       ``hf://`` scheme, False otherwise
     """
     if not model_spec:
         model_spec = DEFAULT_LOCAL_MODEL
@@ -269,11 +274,14 @@ def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str]:
         hf_filename = hf_filename.lstrip("/")
         repo_id = repo_id.strip().strip("/")
         local_path = MODEL_CACHE_ROOT / repo_id / hf_filename
-        return str(local_path), repo_id, hf_filename
+        return str(local_path), repo_id, hf_filename, True
 
     basename = os.path.basename(model_spec)
     hf_filename = basename if basename else DEFAULT_HF_FILENAME
-    return model_spec, DEFAULT_HF_REPO, hf_filename
+    # For non-HF specs we keep DEFAULT_HF_REPO for potential fairchem
+    # auto-downloads, but mark is_hf = False so callers can restrict this
+    # behavior to appropriate backends.
+    return model_spec, DEFAULT_HF_REPO, hf_filename, False
 
 
 def _format_device_str(gpu_id: Union[int, str]) -> str:
@@ -288,7 +296,7 @@ def _detect_backend() -> str:
     Returns
     -------
     str
-        'fairchem' or 'mace-torch', raises ImportError if neither is available
+        'fairchem', 'mace-torch', or 'orb-models', raises ImportError if none is available
     """
     try:
         import fairchem.core
@@ -308,10 +316,18 @@ def _detect_backend() -> str:
     except ImportError:
         pass
     
+    try:
+        from orb_models.forcefield import pretrained
+        from orb_models.forcefield.calculator import ORBCalculator
+        return 'orb-models'
+    except ImportError:
+        pass
+    
     raise ImportError(
-        "No MLIP backend found. Please install either:\n"
+        "No MLIP backend found. Please install one of:\n"
         "  pip install mlip-mc[fairchem]\n"
-        "  pip install mlip-mc[mace-torch]"
+        "  pip install mlip-mc[mace-torch]\n"
+        "  pip install mlip-mc[orb-models]"
     )
 
 
@@ -322,16 +338,17 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> 
     Parameters
     ----------
     model_path : str
-        Path to the model file (local path or HuggingFace repo)
+        Path to the model file (local path or HuggingFace repo).
+        For ORB models, this should be the path to the weights checkpoint file.
     device : str
         Device to use ('cuda' or 'cpu')
     backend : str, optional
-        Backend to use ('fairchem' or 'mace-torch'). If None, auto-detects.
+        Backend to use ('fairchem', 'mace-torch', or 'orb-models'). If None, auto-detects.
     
     Returns
     -------
     Any
-        ASE calculator instance (FAIRChemCalculator or mace_mp)
+        ASE calculator instance (FAIRChemCalculator, mace_mp, or ORBCalculator)
     """
     if backend is None:
         backend = _detect_backend()
@@ -358,6 +375,32 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> 
         )
         return model
     
+    elif backend == 'orb-models':
+        from orb_models.forcefield import pretrained
+        from orb_models.forcefield.calculator import ORBCalculator
+
+        # ORB models normally download pretrained weights automatically. We make
+        # ``weights_path`` optional so that:
+        #   - By default, pretrained.orb_v3_conservative_inf_omat(...) handles
+        #     downloading and caching.
+        #   - If the user provides ``--model some/orb/weights.pt`` and that file
+        #     exists, we pass it through as ``weights_path`` to override the
+        #     default checkpoint.
+        if model_path is not None and os.path.exists(model_path):
+            orbff = pretrained.orb_v3_conservative_inf_omat(
+                device=device,
+                precision="float32-high",
+                weights_path=model_path,
+            )
+        else:
+            orbff = pretrained.orb_v3_conservative_inf_omat(
+                device=device,
+                precision="float32-high",
+            )
+
+        calc = ORBCalculator(orbff, device=device)
+        return calc
+    
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -375,7 +418,10 @@ def run_single_pressure(
     result_queue: Queue,
     adsorbate_name: Optional[str] = None,
     output_dir: str = 'results',
-    save_interval: int = 1000
+    checkpoint_interval: int = 10000,
+    write_trajectory: bool = False,
+    trajectory_interval: int = 100,
+    overwrite_checkpoints: bool = False,
 ) -> None:
     """
     Run GCMC simulation for a single pressure point on a specific GPU.
@@ -404,8 +450,14 @@ def run_single_pressure(
         Queue to return results
     output_dir : str, optional
         Directory to save results (default: 'results')
-    save_interval : int, optional
-        Interval for saving checkpoints (default: 1000)
+    checkpoint_interval : int, optional
+        Interval for saving checkpoints (default: 10000)
+    write_trajectory : flag, optional
+        If specified will output an ase atoms trajectory
+    trajectory_interval : int, optional
+        Interval for saving trajectory (default: 100)
+    overwrite_checkpoints : flag, optional
+        If specified will overwrite previous checkpoints when writing new checkpoint
     """
     try:
         # 1. Set Environment Variables for GPU Isolation
@@ -482,15 +534,18 @@ def run_single_pressure(
             output_dir=output_dir,
             n_equilibration_steps=n_equilibration_steps,  # Total equilibration steps (target)
             n_production_steps=n_production_steps,  # Total production steps (target)
-            save_interval=save_interval
+            checkpoint_interval=checkpoint_interval,
+            write_trajectory=write_trajectory,
+            trajectory_interval=trajectory_interval,
+            overwrite_checkpoints=overwrite_checkpoints
         )
         
         print(f"  [{device_str}] Running {n_total_steps} steps...")
         gcmc.run(N=n_total_steps)
         
-        log_file_bin = os.path.join(output_dir, f"log_{P/bar:.5f}bar.bin")
-        results_file_npz = os.path.join(output_dir, f"results_{P/bar:.5f}bar.npz")
-        results_file_json = os.path.join(output_dir, f"results_{P/bar:.5f}bar.json")
+        log_file_bin = os.path.join(output_dir, f"log_{P/bar:.2f}bar.bin")
+        results_file_npz = os.path.join(output_dir, f"results_{P/bar:.2f}bar.npz")
+        results_file_json = os.path.join(output_dir, f"results_{P/bar:.2f}bar.json")
         
         uptake_data = []
         energy_data = []
@@ -610,7 +665,10 @@ def run_gcmc(
     model_path: str = "models/model.pt",
     output_dir: str = 'results',
     hf_token: Optional[str] = None,
-    save_interval: int = 1000
+    checkpoint_interval: int = 10000,
+    write_trajectory: bool = False,
+    trajectory_interval : int = 100,
+    overwrite_checkpoints : bool = False
 ) -> Dict[str, Any]:
     """
     Run GCMC isotherm simulation for gas adsorption in a porous material.
@@ -642,7 +700,7 @@ def run_gcmc(
         Directory to save results (default: 'results')
     hf_token : str, optional
         Hugging Face authentication token. If None, uses cached token or prompts for login
-    save_interval : int, optional
+    checkpoint_interval : int, optional
         Interval for saving checkpoints (default: 1000)
     
     Returns
@@ -680,38 +738,82 @@ def run_gcmc(
     else:
         n_gpus = 0
         _print_warning("No GPUs available, using CPU")
-    
-    model_path, hf_repo_id, hf_model_filename = _resolve_model_spec(model_path)
+
+    # Detect backend once in the parent process so we can make backend-aware
+    # decisions about how to interpret model paths (e.g., which defaults or
+    # Hugging Face models are applicable).
+    backend = _detect_backend()
+
+    model_path, hf_repo_id, hf_model_filename, is_hf = _resolve_model_spec(model_path)
 
     _print_subsection("Model Configuration")
-    cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
-    if os.path.exists(cache_path):
-        model_path = str(cache_path)
-        _print_info("Model Status", f"Found in cache at {model_path}")
-    elif not os.path.exists(model_path):
-        _print_info("Model Status", f"Not found at {model_path}")
-        _print_info("Action", "Downloading from Hugging Face Hub...")
-        try:
-            model_path = download_model_from_huggingface(
-                model_path,
-                repo_id=hf_repo_id,
-                filename=hf_model_filename,
-                token=hf_token
-            )
-            _print_success(f"Model downloaded successfully to: {model_path}")
-        except Exception as e:
-            raise FileNotFoundError(
-                f"Model file not found at {model_path}\n"
-                f"Failed to download from Hugging Face: {e}\n"
-                "Please ensure the model file exists or check your Hugging Face authentication."
-            )
+
+    # Decide whether to use Hugging Face caching / auto-download logic.
+    #
+    # Rules:
+    #   - If the user explicitly requested an HF model (is_hf=True), always
+    #     honor that, regardless of backend.
+    #   - If the model path is a plain local path (is_hf=False), we only
+    #     auto-resolve to the default HF fairchem model for the *fairchem*
+    #     backend. Other backends (e.g., 'orb-models') will treat the path
+    #     as a normal local weights file and will *not* silently reuse the
+    #     cached fairchem checkpoint.
+    use_hf_cache = is_hf or (backend == 'fairchem')
+
+    if use_hf_cache:
+        cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
+        if os.path.exists(cache_path):
+            model_path = str(cache_path)
+            _print_info("Model Status", f"Found in cache at {model_path}")
+        elif not os.path.exists(model_path):
+            _print_info("Model Status", f"Not found at {model_path}")
+            _print_info("Action", "Downloading from Hugging Face Hub...")
+            try:
+                model_path = download_model_from_huggingface(
+                    model_path,
+                    repo_id=hf_repo_id,
+                    filename=hf_model_filename,
+                    token=hf_token
+                )
+                _print_success(f"Model downloaded successfully to: {model_path}")
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    f"Failed to download from Hugging Face: {e}\n"
+                    "Please ensure the model file exists or check your Hugging Face authentication."
+                )
+        else:
+            _print_info("Model Status", f"Found at {model_path}")
     else:
-        _print_info("Model Status", f"Found at {model_path}")
+        # Non-fairchem backends with a plain local path: do not transparently
+        # redirect to the default HF fairchem model.
+        if not os.path.exists(model_path):
+            # For orb-models the pretrained weights are fetched automatically,
+            # so a missing local path is not necessarily an error unless the
+            # user explicitly passed a (nonexistent) override. We keep the
+            # behavior simple: if the file is missing, we fall back to the
+            # default orb_models checkpoint logic.
+            if backend == 'orb-models':
+                _print_info(
+                    "Model Status",
+                    "Local model file not found; using orb-models pretrained checkpoint "
+                    "(weights will be downloaded/cached automatically).",
+                )
+                model_path = None
+            else:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    "For non-fairchem backends, please provide a valid local "
+                    "weights checkpoint path or an explicit Hugging Face model via "
+                    "the 'hf://' scheme."
+                )
+        else:
+            _print_info("Model Status", f"Using local model at {model_path}")
     
     _print_subsection("Structure Loading")
     if not os.path.exists(adsorbent_path):
         raise FileNotFoundError(f"Adsorbent file not found: {adsorbent_path}")
-    
+
     _print_info("Adsorbent", f"Loading from {adsorbent_path}...")
     atoms_frame = read(adsorbent_path)
     atoms_frame = Atoms(
@@ -787,7 +889,8 @@ def run_gcmc(
         p = Process(target=run_single_pressure, args=(
             P_bar, temperature, model_path, atoms_frame, atoms_ads,
             n_equilibration_steps, n_production_steps, n_total_steps,
-            gpu_id, result_queue, adsorbate_name, output_dir, save_interval
+            gpu_id, result_queue, adsorbate_name, output_dir, checkpoint_interval, 
+            write_trajectory, trajectory_interval, overwrite_checkpoints
         ))
         p.start()
         active_processes.append(p)
@@ -860,6 +963,239 @@ def run_gcmc(
     return isotherm_data
 
 
+def run_widom(
+    adsorbent_path: str,
+    adsorbate_path: Optional[str] = None,
+    adsorbate_molecule: Optional[str] = None,
+    temperature: float = 298.0,
+    n_trials: int = 10000,
+    model_path: str = "models/model.pt",
+    output_dir: str = 'results',
+    hf_token: Optional[str] = None,
+    gpu_id: Union[int, str] = 0
+) -> Dict[str, Any]:
+    """
+    Run Widom insertion calculation for estimating Henry's constants and adsorption energies.
+    
+    Parameters
+    ----------
+    adsorbent_path : str
+        Path to adsorbent (framework) structure file (.xyz, .cif, or other ASE-readable format)
+    adsorbate_path : str, optional
+        Path to adsorbate molecule structure file (.xyz, .cif, etc.)
+        If None, adsorbate_molecule must be provided
+    adsorbate_molecule : str, optional
+        Name of molecule to build using ASE (e.g., 'CO2', 'CH4', 'H2O')
+        Used only if adsorbate_path is None
+    temperature : float, optional
+        Temperature in Kelvin (default: 298.0)
+    n_trials : int, optional
+        Number of Widom insertion trials (default: 10000)
+    model_path : str, optional
+        Path to MLIP model file (default: "models/model.pt").
+        Can be a local path or a Hugging Face repository name (e.g., "fengxuyoung/MLIP-MC").
+        Missing files are automatically downloaded from Hugging Face and cached.
+    output_dir : str, optional
+        Directory to save results (default: 'results')
+    hf_token : str, optional
+        Hugging Face authentication token. If None, uses cached token or prompts for login
+    gpu_id : int or str, optional
+        GPU device ID to use (int for GPU, 'cpu' for CPU, default: 0)
+    
+    Returns
+    -------
+    dict
+        Dictionary containing Widom results:
+        - 'temperature': temperature (K)
+        - 'attempts': total number of insertion attempts
+        - 'valid_insertions': number of valid insertions (no VDW overlap)
+        - 'vdw_overlaps': number of rejected insertions due to VDW overlap
+        - 'widom_adsorption_energy': weighted average adsorption energy (eV)
+        - 'arithmetic_adsorption_energy': arithmetic average adsorption energy (eV)
+        - 'average_boltzmann_factor': average Boltzmann factor
+        - 'raw_adsorption_energies': list of all interaction energies (eV)
+    """
+    _print_banner()
+    _print_section_header("Widom Insertion Calculation")
+    
+    import torch
+    from mlip_mc.src.widom import MLP_Widom
+    
+    # Check available GPUs
+    _print_subsection("Hardware Configuration")
+    if torch.cuda.is_available():
+        n_gpus = torch.cuda.device_count()
+        _print_info("GPUs Available", f"{n_gpus}")
+        for i in range(n_gpus):
+            _print_info(f"  GPU {i}", torch.cuda.get_device_name(i))
+    else:
+        n_gpus = 0
+        _print_warning("No GPUs available, using CPU")
+    
+    # Detect backend
+    backend = _detect_backend()
+    
+    model_path, hf_repo_id, hf_model_filename, is_hf = _resolve_model_spec(model_path)
+    
+    _print_subsection("Model Configuration")
+    
+    # Handle model caching/downloading
+    use_hf_cache = is_hf or (backend == 'fairchem')
+    
+    if use_hf_cache:
+        cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
+        if os.path.exists(cache_path):
+            model_path = str(cache_path)
+            _print_info("Model Status", f"Found in cache at {model_path}")
+        elif not os.path.exists(model_path):
+            _print_info("Model Status", f"Not found at {model_path}")
+            _print_info("Action", "Downloading from Hugging Face Hub...")
+            try:
+                model_path = download_model_from_huggingface(
+                    model_path,
+                    repo_id=hf_repo_id,
+                    filename=hf_model_filename,
+                    token=hf_token
+                )
+                _print_success(f"Model downloaded successfully to: {model_path}")
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    f"Failed to download from Hugging Face: {e}\n"
+                    "Please ensure the model file exists or check your Hugging Face authentication."
+                )
+        else:
+            _print_info("Model Status", f"Found at {model_path}")
+    else:
+        if not os.path.exists(model_path):
+            if backend == 'orb-models':
+                _print_info(
+                    "Model Status",
+                    "Local model file not found; using orb-models pretrained checkpoint "
+                    "(weights will be downloaded/cached automatically).",
+                )
+                model_path = None
+            else:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    "For non-fairchem backends, please provide a valid local "
+                    "weights checkpoint path or an explicit Hugging Face model via "
+                    "the 'hf://' scheme."
+                )
+        else:
+            _print_info("Model Status", f"Using local model at {model_path}")
+    
+    _print_subsection("Structure Loading")
+    if not os.path.exists(adsorbent_path):
+        raise FileNotFoundError(f"Adsorbent file not found: {adsorbent_path}")
+    
+    _print_info("Adsorbent", f"Loading from {adsorbent_path}...")
+    atoms_frame = read(adsorbent_path)
+    atoms_frame = Atoms(
+        numbers=atoms_frame.numbers,
+        positions=atoms_frame.positions,
+        cell=atoms_frame.cell,
+        pbc=atoms_frame.pbc
+    )
+    
+    if adsorbate_path is not None:
+        if not os.path.exists(adsorbate_path):
+            raise FileNotFoundError(f"Adsorbate file not found: {adsorbate_path}")
+        _print_info("Adsorbate", f"Loading from {adsorbate_path}...")
+        atoms_ads = read(adsorbate_path)
+        atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
+        adsorbate_name = atoms_ads.get_chemical_formula().replace(' ', '')
+        _print_info("Adsorbate Name", adsorbate_name)
+    elif adsorbate_molecule is not None:
+        _print_info("Adsorbate", f"Creating {adsorbate_molecule} molecule...")
+        atoms_ads = molecule(adsorbate_molecule)
+        atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
+        adsorbate_name = adsorbate_molecule
+        _print_info("Adsorbate Name", adsorbate_name)
+    else:
+        raise ValueError("Either adsorbate_path or adsorbate_molecule must be provided")
+    
+    _print_subsection("Simulation Parameters")
+    _print_info("Temperature", f"{temperature} K")
+    _print_info("Number of Trials", f"{n_trials}")
+    
+    cell_volume = np.linalg.det(atoms_frame.get_cell())
+    cell_volume_cm3 = cell_volume * 1e-24
+    _print_info("Unit Cell Volume", f"{cell_volume:.2f} Å³ ({cell_volume_cm3:.2e} cm³)")
+    
+    _print_subsection("Simulation Execution")
+    
+    # Set device
+    if isinstance(gpu_id, int) and gpu_id >= 0 and torch.cuda.is_available():
+        if gpu_id >= torch.cuda.device_count():
+            _print_warning(f"GPU {gpu_id} not available, using GPU 0")
+            gpu_id = 0
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        device = 'cuda'
+        device_str = f"GPU {gpu_id}"
+    else:
+        device = 'cpu'
+        device_str = "CPU"
+    
+    _print_info("Device", device_str)
+    _print_info("Backend", backend)
+    
+    # Load model
+    model = _load_model(model_path, device=device, backend=backend)
+    
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create Widom instance
+    widom = MLP_Widom(
+        model=model,
+        atoms_frame=atoms_frame,
+        atoms_ads=atoms_ads,
+        T=temperature,
+        device=device,
+        vdw_radii=vdw_radii,
+        output_dir=output_dir
+    )
+    
+    # Run simulation
+    print(f"\n  [{device_str}] Running {n_trials} Widom insertion trials...")
+    widom.run(N=n_trials)
+    
+    # Read results
+    results_file = os.path.join(output_dir, 'widom_results.json')
+    
+    widom_data = {}
+    if os.path.exists(results_file):
+        with open(results_file, 'r') as f:
+            widom_data = json.load(f)
+    else:
+        # Fallback: construct from widom stats
+        widom_data = {
+            'temperature': temperature,
+            'attempts': widom.stats['attempts'],
+            'valid_insertions': widom.stats['valid_insertions'],
+            'vdw_overlaps': widom.stats['vdw_overlaps']
+        }
+    
+    _print_section_header("Results Summary")
+    _print_info("Temperature", f"{widom_data.get('temperature', temperature)} K")
+    _print_info("Total Attempts", f"{widom_data.get('attempts', 0)}")
+    _print_info("Valid Insertions", f"{widom_data.get('valid_insertions', 0)}")
+    _print_info("VDW Overlaps", f"{widom_data.get('vdw_overlaps', 0)}")
+    
+    if 'widom_adsorption_energy' in widom_data:
+        _print_info("Widom Adsorption Energy", f"{widom_data['widom_adsorption_energy']:.5f} eV")
+        _print_info("Arithmetic Avg Energy", f"{widom_data['arithmetic_adsorption_energy']:.5f} eV")
+        _print_info("Avg Boltzmann Factor", f"{widom_data['average_boltzmann_factor']:.5e}")
+    
+    print()
+    _print_section_header("Simulation Complete")
+    print(f"  Results saved to: {output_dir}/")
+    print()
+    
+    return widom_data
+
+
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -904,9 +1240,14 @@ Examples:
                         help='Hugging Face authentication token (optional, uses cached token if available)')
     parser.add_argument('--output-dir', type=str, default='results',
                         help='Output directory for results (default: results)')
-    parser.add_argument('--save-interval', type=int, default=1000,
-                        help='Interval for saving checkpoints (default: 1000)')
-    
+    parser.add_argument('--checkpoint-interval', type=int, default=10000,
+                        help='Interval for saving checkpoints (default: 10000)')
+    parser.add_argument('--write-trajectory', action='store_true',
+                        help='Write trajectory files')
+    parser.add_argument('--trajectory-interval', type=int, default=100,
+                        help='Interval for writing structures (default: 100)')
+    parser.add_argument('--overwrite-checkpoints', action='store_true',
+                        help='Write trajectory files')
     return parser.parse_args()
 
 
@@ -960,7 +1301,8 @@ def main() -> None:
         print(f"ERROR: Invalid pressure format: {args.pressures}", file=sys.stderr)
         print("Please provide comma-separated numbers or a single number", file=sys.stderr)
         sys.exit(1)
-    
+
+
     # Run simulation
     try:
         run_gcmc(
@@ -974,7 +1316,10 @@ def main() -> None:
             model_path=args.model,
             output_dir=args.output_dir,
             hf_token=args.hf_token,
-            save_interval=args.save_interval
+            checkpoint_interval=args.checkpoint_interval,
+            write_trajectory=args.write_trajectory,
+            trajectory_interval=args.trajectory_interval,
+            overwrite_checkpoints = args.overwrite_checkpoints
         )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)
