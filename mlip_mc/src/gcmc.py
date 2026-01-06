@@ -275,7 +275,7 @@ class MLP_GCMC:
         restart_json = os.path.join(restart_dir, f'restart_{self.P/bar:.2f}bar.json')
         return restart_xyz, restart_json
 
-    def _save_history_checkpoint(self, atoms: Atoms, step: int, uptake: int, interaction_energy: float, total_energy: float, overwrite_checkpoints: bool) -> None:
+    def _save_history_checkpoint(self, atoms: Atoms, step: int, uptake: int, interaction_energy: float, total_energy: float, overwrite_checkpoints: bool = False) -> None:
         """Save a history checkpoint to checkpoints_{pressure}bar/checkpoint_{step} folder."""
         # Create parent folder for all checkpoints at this pressure
         checkpoints_parent_dir = Path(self.output_dir) / f'checkpoints_{self.P/bar:.2f}bar'
@@ -498,6 +498,23 @@ class MLP_GCMC:
             If restarting, only the remaining steps will be run.
         """
         
+        # Initialize results lists
+        uptake_list = []
+        interaction_energy_list = []
+        total_energy_list = []
+
+        # Load existing results for continuity if restarting
+        results_file = Path(self.output_dir) / f"results_{self.P/bar:.2f}bar.json"
+        if results_file.exists():
+            try:
+                with open(results_file, 'r') as f:
+                    prev_results = json.load(f)
+                    uptake_list = prev_results.get('uptake', [])
+                    interaction_energy_list = prev_results.get('interaction_energy', [])
+                    total_energy_list = prev_results.get('total_energy', [])
+            except Exception as e:
+                print(f"Warning: could not load previous results: {e}")
+
         atoms = self._load_restart_info()
         if atoms is None:
             # No restart found, start fresh
@@ -526,9 +543,12 @@ class MLP_GCMC:
 
         framework = self.atoms_frame.copy()
         framework.calc = self.model
-        framework_E = atoms.get_potential_energy()
+        framework_E = framework.get_potential_energy()
 
-        print(f'framework E: {framework_E}, adsorbate_E: {adsorbate_E}')
+        # Calculate initial interaction energy
+        interaction_E = e_interaction_of_adsorption(e, framework_E, adsorbate_E, self.Z_ads)
+
+        print(f'framework E: {framework_E}, adsorbate_E: {adsorbate_E}, initial interaction E: {interaction_E}')
 
         checkpoint_loaded = (self._restart_iteration >= 0 or 
                             (hasattr(self, '_restart_n_equil_completed') and 
@@ -662,6 +682,11 @@ class MLP_GCMC:
                         success = True
 
             current_step = iteration + 1 + iteration_offset
+            
+            # Record results for every step (needed for statistics and continuity)
+            uptake_list.append(int(self.Z_ads))
+            interaction_energy_list.append(float(interaction_E))
+            total_energy_list.append(float(e))
 
             if success:
                 self._log_step_binary(current_step, self.Z_ads, interaction_E, e, atoms)
@@ -680,6 +705,9 @@ class MLP_GCMC:
         self._save_restart(atoms, total_steps_completed)
         
         if total_steps_completed % self.checkpoint_interval != 0:
-            self._save_history_checkpoint(atoms, total_steps_completed, self.Z_ads, interaction_E, e)
-             
+            self._save_history_checkpoint(atoms, total_steps_completed, self.Z_ads, interaction_E, e, self.overwrite_checkpoints)
+        
+        # Save final results to JSON
+        self._save_results_json(uptake_list, interaction_energy_list, total_energy_list)
+        
         self._print_statistics()

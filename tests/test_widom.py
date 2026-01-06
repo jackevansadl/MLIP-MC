@@ -294,7 +294,7 @@ class TestWidomRigorous:
         # Check if results directory and files exist
         assert os.path.exists("results")
         assert os.path.exists("results/widom_results.json")
-        assert os.path.exists("results/widom_traj.xyz")
+        assert os.path.exists("results/widom_trajectory.xyz")
         
         # Check stats
         assert widom.stats['attempts'] == steps
