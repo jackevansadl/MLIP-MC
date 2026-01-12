@@ -683,15 +683,14 @@ class MLP_GCMC:
 
             current_step = iteration + 1 + iteration_offset
             
-            # Record results for every step (needed for statistics and continuity)
-            uptake_list.append(int(self.Z_ads))
-            interaction_energy_list.append(float(interaction_E))
-            total_energy_list.append(float(e))
-
+            # Record results for successful every step (needed for statistics and continuity)
             if success:
                 self._log_step_binary(current_step, self.Z_ads, interaction_E, e, atoms)
                 self._save_restart(atoms, current_step)
-
+                uptake_list.append(int(self.Z_ads))
+                interaction_energy_list.append(float(interaction_E))
+                total_energy_list.append(float(e))
+                
             if current_step % self.checkpoint_interval == 0:
                 self._save_history_checkpoint(atoms, current_step, self.Z_ads, interaction_E, e, self.overwrite_checkpoints)
 
