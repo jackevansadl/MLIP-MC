@@ -216,7 +216,7 @@ class TestMLPGCMC:
         total_energy = [-0.1, -0.2, -0.3]
         gcmc._save_results_json(uptake, adsorption_energy, total_energy)
         
-        assert os.path.exists(f"results/results_{1.0:.2f}bar.json")
+        assert os.path.exists(f"results/results_{1.0:.4f}bar.json")
     
     def test_insertion_acceptance_probability_calculation(self, mock_model, atoms_frame, atoms_ads):
         """Test insertion acceptance probability calculation."""
@@ -436,8 +436,8 @@ class TestGCMCRigorous:
         
         # Check if results directory and files exist
         assert os.path.exists("results")
-        assert os.path.exists(f"results/results_{1.0:.2f}bar.json")
-        assert os.path.exists(f"results/traj_{1.0:.2f}bar.xyz")
+        assert os.path.exists(f"results/results_{1.0:.4f}bar.json")
+        assert os.path.exists(f"results/traj_{1.0:.4f}bar.xyz")
         
         # Check if moves were attempted
         total_attempts = sum(stats['attempted'] for stats in gcmc.moves.values())
@@ -558,7 +558,7 @@ class TestGCMCRigorous:
             gcmc.run(steps)
             
             # Read results from JSON
-            filename = f"results/results_{fugacity_val/bar:.2f}bar.json"
+            filename = f"results/results_{fugacity_val/bar:.4f}bar.json"
             if not os.path.exists(filename):
                 return 0.0
                 
@@ -654,8 +654,8 @@ class TestRestartMechanism:
         
         # Check files exist in restart directory
         restart_dir = os.path.join(output_dir, 'restart')
-        restart_xyz = os.path.join(restart_dir, f'restart_{1.0:.2f}bar.xyz')
-        restart_json = os.path.join(restart_dir, f'restart_{1.0:.2f}bar.json')
+        restart_xyz = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.xyz')
+        restart_json = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.json')
         assert os.path.exists(restart_xyz)
         assert os.path.exists(restart_json)
         
@@ -786,13 +786,13 @@ class TestRestartMechanism:
         # Check restart files exist in restart directory
         restart_dir = os.path.join(output_dir, 'restart')
         assert os.path.exists(restart_dir), "Restart directory should exist"
-        restart_xyz = os.path.join(restart_dir, f'restart_{1.0:.2f}bar.xyz')
-        restart_json = os.path.join(restart_dir, f'restart_{1.0:.2f}bar.json')
+        restart_xyz = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.xyz')
+        restart_json = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.json')
         assert os.path.exists(restart_xyz), f"Restart XYZ not found: {restart_xyz}"
         assert os.path.exists(restart_json), f"Restart JSON not found: {restart_json}"
         
         # Check results file exists
-        results_file = os.path.join(output_dir, f"results_{1.0:.2f}bar.json")
+        results_file = os.path.join(output_dir, f"results_{1.0:.4f}bar.json")
         assert os.path.exists(results_file)
         
         # Load previous results
@@ -877,7 +877,7 @@ class TestRestartMechanism:
         assert not os.path.exists(f"{restart_prefix}.json"), "Main restart JSON should not exist"
         
         # Verify restart file has correct state (from checkpoint)
-        restart_json = os.path.join(restart_dir, f'restart_{1.0:.2f}bar.json')
+        restart_json = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.json')
         with open(restart_json, 'r') as f:
             restart_data = json.load(f)
             assert restart_data['Z_ads'] == gcmc.Z_ads
@@ -909,7 +909,7 @@ class TestRestartMechanism:
         assert all("restart" not in f for f in restart_files)
         
         # But results should still be saved
-        results_file = os.path.join(output_dir, f"results_{1.0:.2f}bar.json")
+        results_file = os.path.join(output_dir, f"results_{1.0:.4f}bar.json")
         assert os.path.exists(results_file)
     
     def test_multiple_sequential_restarts(self, mock_model, atoms_frame, atoms_ads, temp_dir):
@@ -1402,7 +1402,7 @@ class TestRestartMechanism:
         gcmc1.run(10)
         
         # Count trajectory frames
-        traj_file = os.path.join(output_dir, f'traj_{1.0:.2f}bar.xyz')
+        traj_file = os.path.join(output_dir, f'traj_{1.0:.4f}bar.xyz')
         frames_before = len(read(traj_file, index=':'))
         
         # Second run (restart)
@@ -1454,7 +1454,7 @@ class TestRestartMechanism:
         gcmc1.run(15)
         
         # Get first results
-        results_file = os.path.join(output_dir, f"results_{1.0:.2f}bar.json")
+        results_file = os.path.join(output_dir, f"results_{1.0:.4f}bar.json")
         with open(results_file, 'r') as f:
             results1 = json.load(f)
         
