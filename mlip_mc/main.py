@@ -400,7 +400,20 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> 
 
         calc = ORBCalculator(orbff, device=device)
         return calc
-    
+    elif backend == 'nequip':
+        from nequip.ase.nequip_calculator import NequIPCalculator
+        model = NequIPCalculator.from_deployed_model(model_path = model_path,
+                                                    species_to_type_name = {"C" : "C",
+                                                                            "H" : "H",
+                                                                            "N" : "N",
+                                                                            "O" : "O",
+                                                                            "Zn" : "Zn",
+                                                                            "Mg": "Mg",
+                                                                            "Co" : "Co",
+                                                                            "Os" : "Os"},
+                                                    device=device)
+        return model
+
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -489,6 +502,7 @@ def run_single_pressure(
                                                                             "N" : "N",
                                                                             "O" : "O",
                                                                             "Zn" : "Zn",
+                                                                            "Mg": "Mg",
                                                                             "Co" : "Co",
                                                                             "Os" : "Os"},
                                                     device=device)
@@ -1142,7 +1156,14 @@ def run_widom(
     
     # Load model
     model = _load_model(model_path, device=device, backend=backend)
-    
+    from ase.data import vdw_radii
+
+    vdw_radii = vdw_radii.copy()
+    vdw_radii[76] = vdw_radii[8]
+    vdw_radii[27] = vdw_radii[6]
+    # Mg radius is set to 1.0 A
+    vdw_radii[12] = 1.0
+
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
     

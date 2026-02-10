@@ -362,7 +362,7 @@ class MLP_Widom:
 
                 # Calculate Interaction Energy (Delta E)
                 # E_int = E_total - E_framework - E_adsorbate
-                interaction_E = e_trial # - framework_E - adsorbate_E
+                interaction_E = e_trial # - framework_E - adsorbate_E, Note: the finetuned model used here is trained to predict interaction energies directly, so we can use e_trial as the interaction energy
                 e_adsorptions.append(interaction_E)
                 
                 # Log to binary file (only for valid insertions)
