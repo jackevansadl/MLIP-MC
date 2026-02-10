@@ -216,7 +216,7 @@ class TestMLPGCMC:
         total_energy = [-0.1, -0.2, -0.3]
         gcmc._save_results_json(uptake, adsorption_energy, total_energy)
         
-        assert os.path.exists(f"results/results_{1.0:.5f}bar.json")
+        assert os.path.exists(f"results/results_{1.0:.4f}bar.json")
     
     def test_insertion_acceptance_probability_calculation(self, mock_model, atoms_frame, atoms_ads):
         """Test insertion acceptance probability calculation."""
@@ -425,7 +425,9 @@ class TestGCMCRigorous:
             fugacity=1.0 * bar,
             device='cpu',
             vdw_radii=vdw_radii,
-            debug=True
+            debug=True,
+            write_trajectory=True,
+            trajectory_interval=1
         )
         
         # Run for a small number of steps
@@ -434,8 +436,8 @@ class TestGCMCRigorous:
         
         # Check if results directory and files exist
         assert os.path.exists("results")
-        assert os.path.exists(f"results/results_{1.0:.5f}bar.json")
-        assert os.path.exists(f"results/traj_{1.0:.5f}bar.xyz")
+        assert os.path.exists(f"results/results_{1.0:.4f}bar.json")
+        assert os.path.exists(f"results/traj_{1.0:.4f}bar.xyz")
         
         # Check if moves were attempted
         total_attempts = sum(stats['attempted'] for stats in gcmc.moves.values())
@@ -556,7 +558,7 @@ class TestGCMCRigorous:
             gcmc.run(steps)
             
             # Read results from JSON
-            filename = f"results/results_{fugacity_val/bar:.2f}bar.json"
+            filename = f"results/results_{fugacity_val/bar:.4f}bar.json"
             if not os.path.exists(filename):
                 return 0.0
                 
@@ -648,12 +650,12 @@ class TestRestartMechanism:
             test_atoms = test_atoms + atoms_ads.copy()
         
         # Save checkpoint
-        gcmc._save_checkpoint(test_atoms, 1)  # 1 step completed
+        gcmc._save_restart(test_atoms, 1)  # 1 step completed
         
-        # Check files exist in checkpoint directory
-        checkpoint_dir = os.path.join(output_dir, 'checkpoint')
-        restart_xyz = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.xyz')
-        restart_json = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.json')
+        # Check files exist in restart directory
+        restart_dir = os.path.join(output_dir, 'restart')
+        restart_xyz = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.xyz')
+        restart_json = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.json')
         assert os.path.exists(restart_xyz)
         assert os.path.exists(restart_json)
         
@@ -698,7 +700,7 @@ class TestRestartMechanism:
             test_atoms = test_atoms + atoms_ads.copy()
         
         # Save to checkpoint directory
-        gcmc1._save_checkpoint(test_atoms, 1)  # 1 step completed
+        gcmc1._save_restart(test_atoms, 1)  # 1 step completed
         
         # Now create a new instance and load
         gcmc2 = MLP_GCMC(
@@ -781,16 +783,16 @@ class TestRestartMechanism:
         moves_after_first = {k: v.copy() for k, v in gcmc1.moves.items()}
         insertion_vdw_after_first = gcmc1.insertion_rejected_due_to_vdw
         
-        # Check restart files exist in checkpoint directory
-        checkpoint_dir = os.path.join(output_dir, 'checkpoint')
-        assert os.path.exists(checkpoint_dir), "Checkpoint directory should exist"
-        restart_xyz = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.xyz')
-        restart_json = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.json')
+        # Check restart files exist in restart directory
+        restart_dir = os.path.join(output_dir, 'restart')
+        assert os.path.exists(restart_dir), "Restart directory should exist"
+        restart_xyz = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.xyz')
+        restart_json = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.json')
         assert os.path.exists(restart_xyz), f"Restart XYZ not found: {restart_xyz}"
         assert os.path.exists(restart_json), f"Restart JSON not found: {restart_json}"
         
         # Check results file exists
-        results_file = os.path.join(output_dir, f"results_{1.0:.5f}bar.json")
+        results_file = os.path.join(output_dir, f"results_{1.0:.4f}bar.json")
         assert os.path.exists(results_file)
         
         # Load previous results
@@ -828,8 +830,16 @@ class TestRestartMechanism:
         second_interaction_energy = second_results['interaction_energy']
         
         # Second results should contain first results plus new ones
-        assert len(second_uptake) == len(first_uptake) + 15
-        assert len(second_interaction_energy) == len(first_interaction_energy) + 15
+        # Only accepted moves generate results
+        accepted_moves_1 = sum(moves_after_first[m]['accepted'] for m in moves_after_first)
+        accepted_moves_2 = sum(gcmc2.moves[m]['accepted'] for m in gcmc2.moves) - accepted_moves_1
+        
+        # Total accepted moves across both runs
+        total_accepted = accepted_moves_1 + accepted_moves_2
+        
+        # Results length should equal total accepted moves
+        assert len(second_uptake) == total_accepted
+        assert len(second_interaction_energy) == total_accepted
         
         # First part should match
         assert second_uptake[:len(first_uptake)] == first_uptake
@@ -859,15 +869,15 @@ class TestRestartMechanism:
         # Run 25 steps (checkpoint saved every step)
         gcmc.run(25)
         
-        # Check that restart files exist in checkpoint directory
-        checkpoint_dir = os.path.join(output_dir, 'checkpoint')
-        assert os.path.exists(checkpoint_dir), "Checkpoint directory should exist"
+        # Check that restart files exist in restart directory
+        restart_dir = os.path.join(output_dir, 'restart')
+        assert os.path.exists(restart_dir), "Restart directory should exist"
         # Check that main restart files don't exist (backward compatibility removed)
         assert not os.path.exists(f"{restart_prefix}.xyz"), "Main restart XYZ should not exist"
         assert not os.path.exists(f"{restart_prefix}.json"), "Main restart JSON should not exist"
         
         # Verify restart file has correct state (from checkpoint)
-        restart_json = os.path.join(checkpoint_dir, f'restart_{1.0:.5f}bar.json')
+        restart_json = os.path.join(restart_dir, f'restart_{1.0:.4f}bar.json')
         with open(restart_json, 'r') as f:
             restart_data = json.load(f)
             assert restart_data['Z_ads'] == gcmc.Z_ads
@@ -899,7 +909,7 @@ class TestRestartMechanism:
         assert all("restart" not in f for f in restart_files)
         
         # But results should still be saved
-        results_file = os.path.join(output_dir, f"results_{1.0:.5f}bar.json")
+        results_file = os.path.join(output_dir, f"results_{1.0:.4f}bar.json")
         assert os.path.exists(results_file)
     
     def test_multiple_sequential_restarts(self, mock_model, atoms_frame, atoms_ads, temp_dir):
@@ -1070,7 +1080,7 @@ class TestRestartMechanism:
         output_dir = os.path.join(temp_dir, "results")
         gcmc1.output_dir = output_dir
         # Save checkpoint
-        gcmc1._save_checkpoint(test_atoms, 1)  # 1 step completed
+        gcmc1._save_restart(test_atoms, 1)  # 1 step completed
         
         # Load and verify all fields
         gcmc2 = MLP_GCMC(
@@ -1135,7 +1145,7 @@ class TestRestartMechanism:
         gcmc1.Z_ads = 3
         # Save to interval directory
         # Save checkpoint
-        gcmc1._save_checkpoint(test_atoms, 1)  # 1 step completed
+        gcmc1._save_restart(test_atoms, 1)  # 1 step completed
         
         # Load and verify
         gcmc2 = MLP_GCMC(
@@ -1184,7 +1194,7 @@ class TestRestartMechanism:
         gcmc1.moves['insertion']['accepted'] = 0
         # Save to interval directory
         # Save checkpoint
-        gcmc1._save_checkpoint(atoms_frame.copy(), 1)  # 1 step completed
+        gcmc1._save_restart(atoms_frame.copy(), 1)  # 1 step completed
         
         # Load and verify
         gcmc2 = MLP_GCMC(
@@ -1230,14 +1240,14 @@ class TestRestartMechanism:
         
         gcmc.run(10)
         
-        # Check that checkpoint directory exists
-        checkpoint_dir = os.path.join(output_dir, "checkpoint")
-        assert os.path.exists(checkpoint_dir), "Checkpoint directory should exist"
+        # Check that restart directory exists
+        restart_dir = os.path.join(output_dir, "restart")
+        assert os.path.exists(restart_dir), "Restart directory should exist"
         
         # Check that checkpoint files exist
-        checkpoint_files = os.listdir(checkpoint_dir)
-        restart_files = [f for f in checkpoint_files if f.startswith("restart_")]
-        assert len(restart_files) >= 1, "Should have at least one restart file in checkpoint"
+        restart_files_in_dir = os.listdir(restart_dir)
+        restart_files = [f for f in restart_files_in_dir if f.startswith("restart_")]
+        assert len(restart_files) >= 1, "Should have at least one restart file in restart directory"
     
     def test_restart_checkpoint_overwrites(self, mock_model, atoms_frame, atoms_ads, temp_dir):
         """Test that checkpoint overwrites previous checkpoint each step."""
@@ -1262,22 +1272,22 @@ class TestRestartMechanism:
         
         gcmc.run(20)
         
-        # Check that checkpoint directory exists
-        checkpoint_dir = os.path.join(output_dir, "checkpoint")
-        assert os.path.exists(checkpoint_dir), "Checkpoint directory should exist"
+        # Check that restart directory exists
+        restart_dir = os.path.join(output_dir, "restart")
+        assert os.path.exists(restart_dir), "Restart directory should exist"
         
-        # Check that checkpoint files exist (should only have one set, overwritten each step)
-        checkpoint_files = os.listdir(checkpoint_dir)
-        restart_files = [f for f in checkpoint_files if f.startswith("restart_")]
-        assert len(restart_files) >= 1, "Should have restart files in checkpoint"
+        # Check that restart files exist (should only have one set, overwritten each step)
+        restart_files_in_dir = os.listdir(restart_dir)
+        restart_files = [f for f in restart_files_in_dir if f.startswith("restart_")]
+        assert len(restart_files) >= 1, "Should have restart files in restart directory"
         
         # Check that main restart files don't exist (backward compatibility removed)
         assert not os.path.exists(f"{restart_prefix}.xyz"), "Main restart XYZ should not exist"
         assert not os.path.exists(f"{restart_prefix}.json"), "Main restart JSON should not exist"
-        # Checkpoint directory should only have restart files, no snapshots
-        snapshot_files = [f for f in checkpoint_files if f.startswith("snapshot_")]
-        assert len(restart_files) >= 1, "Checkpoint should have restart files"
-        assert len(snapshot_files) == 0, "Checkpoint should not have snapshot files"
+        # Restart directory should only have restart files, no snapshots
+        snapshot_files = [f for f in restart_files_in_dir if f.startswith("snapshot_")]
+        assert len(restart_files) >= 1, "Restart directory should have restart files"
+        assert len(snapshot_files) == 0, "Restart directory should not have snapshot files"
         
         # Check that main restart files don't exist (backward compatibility removed)
         assert not os.path.exists(f"{restart_prefix}.xyz"), "Main restart XYZ should not exist"
@@ -1386,11 +1396,13 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
+            write_trajectory=True,
+            trajectory_interval=1
         )
         gcmc1.run(10)
         
         # Count trajectory frames
-        traj_file = os.path.join(output_dir, f'traj_{1.0:.5f}bar.xyz')
+        traj_file = os.path.join(output_dir, f'traj_{1.0:.4f}bar.xyz')
         frames_before = len(read(traj_file, index=':'))
         
         # Second run (restart)
@@ -1407,6 +1419,8 @@ class TestRestartMechanism:
             debug=False,
             output_dir=output_dir,
             restart_prefix=restart_prefix,
+            write_trajectory=True,
+            trajectory_interval=1
         )
         gcmc2.run(10)
         
@@ -1440,7 +1454,7 @@ class TestRestartMechanism:
         gcmc1.run(15)
         
         # Get first results
-        results_file = os.path.join(output_dir, f"results_{1.0:.5f}bar.json")
+        results_file = os.path.join(output_dir, f"results_{1.0:.4f}bar.json")
         with open(results_file, 'r') as f:
             results1 = json.load(f)
         
@@ -1466,19 +1480,27 @@ class TestRestartMechanism:
             results2 = json.load(f)
         
         # Verify continuity
-        assert len(results2['uptake']) == 25  # 15 + 10
-        assert len(results2['interaction_energy']) == 25
-        assert len(results2['total_energy']) == 25
+        # Calculate total accepted moves across both runs
+        # Note: gcmc2.moves contains cumulative stats if loaded from restart, 
+        # but here we need to check if restart loading preserves stats.
+        # The test setup implies gcmc2 loads restart info, so gcmc2.moves should have total stats.
         
-        # First 15 should match
-        assert results2['uptake'][:15] == results1['uptake']
-        assert results2['interaction_energy'][:15] == results1['interaction_energy']
-        assert results2['total_energy'][:15] == results1['total_energy']
+        total_accepted = sum(gcmc2.moves[m]['accepted'] for m in gcmc2.moves)
+        assert len(results2['uptake']) == total_accepted
+        assert len(results2['interaction_energy']) == total_accepted
+        assert len(results2['total_energy']) == total_accepted
         
-        # Last values should be different (new steps)
-        assert results2['uptake'][-1] is not None
-        assert results2['interaction_energy'][-1] is not None
-        assert results2['total_energy'][-1] is not None
+        # First part should match
+        n_first = len(results1['uptake'])
+        assert results2['uptake'][:n_first] == results1['uptake']
+        assert results2['interaction_energy'][:n_first] == results1['interaction_energy']
+        assert results2['total_energy'][:n_first] == results1['total_energy']
+        
+        # Last values check (only if we have results)
+        if len(results2['uptake']) > 0:
+            assert results2['uptake'][-1] is not None
+            assert results2['interaction_energy'][-1] is not None
+            assert results2['total_energy'][-1] is not None
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

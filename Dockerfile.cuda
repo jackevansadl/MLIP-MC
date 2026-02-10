@@ -1,0 +1,54 @@
+FROM nvidia/cuda:12.6.0-devel-ubuntu24.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install additional system dependencies
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    libjpeg-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip to the latest version
+RUN pip install --upgrade pip --break-system-packages --ignore-installed
+
+# Set backend via build argument (defaults to fairchem-core)
+ARG MLIP_BACKEND=fairchem-core
+ENV MLIP_BACKEND=${MLIP_BACKEND}
+
+
+# Install PyTorch for CUDA 12.6 - using 2.6.0 for broad compatibility
+# All three backends work with PyTorch 2.6.x+
+RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu126 \
+    --break-system-packages
+
+# Install backend-specific dependencies
+RUN if [ "$MLIP_BACKEND" = "fairchem-core" ]; then \
+        # fairchem-core v2: Simplified installation - no torch-geometric needed
+        pip install fairchem-core --break-system-packages; \
+    elif [ "$MLIP_BACKEND" = "mace-torch" ]; then \
+        # mace-torch: e3nn is auto-installed as a dependency
+        pip install mace-torch --break-system-packages; \
+    elif [ "$MLIP_BACKEND" = "orb-models" ]; then \
+        # orb-models: straightforward installation
+        # pynanoflann required for neighbor list computation
+        pip install orb-models --break-system-packages && \
+        pip install "pynanoflann @ git+https://github.com/dwastberg/pynanoflann#egg=af434039ae14bedcbb838a7808924d6689274168" --break-system-packages; \
+    fi
+
+
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the current directory contents into the container
+COPY . /app
+
+# Install the current project with the specified backend
+RUN pip install ".[${MLIP_BACKEND}]" --break-system-packages
+
+# Default command to keep the container running or drop into a shell
+CMD ["/bin/bash"]
