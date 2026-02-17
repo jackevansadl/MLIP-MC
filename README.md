@@ -16,26 +16,38 @@ MLIP-MC supports three MLIP backends. You must install one of them:
 - **MACE-Torch**: For MACE models (e.g., MACE-MP models)
 - **Orbital**: For Orbital models (e.g. orb_v3_conservative_inf_omat)
 
-### Quick Install
+### Install from PyPI (Recommended)
 
-Install MLIP-MC with your preferred backend:
+Install MLIP-MC with your preferred backend directly from PyPI:
 
 **With FAIRChem backend:**
 ```bash
-# rocm install: pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4
-pip install ".[fairchem]"
+pip install "mlip-mc[fairchem]"
 ```
 
 **With MACE-Torch backend:**
 ```bash
-# rocm install: pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
-pip install ".[mace-torch]"
+pip install "mlip-mc[mace-torch]"
 ```
 
 **With Orbital backend:**
 ```bash
-# rocm install: pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
-pip install ".["orb-models"]"
+pip install "mlip-mc[orb-models]"
+```
+
+> **ROCm users:** Install the ROCm version of PyTorch first before installing MLIP-MC:
+> ```bash
+> pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4
+> ```
+
+### Install from Source
+
+Clone the repository and install locally:
+
+```bash
+git clone https://github.com/jackevansadl/MLIP-MC.git
+cd MLIP-MC
+pip install ".[fairchem]"   # or ".[mace-torch]" or ".[orb-models]"
 ```
 
 **Development mode (includes test tooling):**
