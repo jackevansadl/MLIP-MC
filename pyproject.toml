@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mlip-mc"
-version = "0.1.0"
+version = "0.1.1"
 description = "Monte Carlo Simulations with Machine-Learned Interatomic Potentials"
 readme = "README.md"
 requires-python = ">=3.9"
