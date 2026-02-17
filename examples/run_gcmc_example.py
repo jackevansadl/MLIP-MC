@@ -27,7 +27,7 @@ def main() -> None:
         pressure_points=[0.1, 1.0, 5.0],
         n_equilibration_steps=2000,
         n_production_steps=5000,
-        model_path="fengxuyoung/MLIP-MC",
+        model_path="models/model.pt",  # CHANGE THIS to your model path
         output_dir=str(output_dir),
         hf_token=None,
         write_trajectory=True,

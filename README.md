@@ -59,6 +59,7 @@ mlip_mc \\
     --pressures 0.1,0.5,1.0,2.0,5.0,10.0,20.0 \\
     --n-equil 10000 \\
     --n-prod 20000 \\
+    --model models/model.pt \\
     --output-dir results \\
     --checkpoint-interval 10000 \\
     --write-trajectory \\
@@ -75,6 +76,7 @@ mlip_mc \\
     --adsorbate-molecule CO2 \\
     --temperature 298.0 \\
     --n-trials 10000 \\
+    --model models/model.pt \\
     --output-dir widom_results
 ```
 
@@ -89,7 +91,7 @@ mlip_mc \\
 - `--n-prod`: Number of production steps for GCMC (default: 20000)
 - `--n-trials`: Number of Widom insertion trials (default: 10000)
 - `--checkpoint-interval`: Interval for saving history checkpoints in GCMC (default: 10000)
-- `--model`: Path to MLIP model file. Can be a local path (default: `models/model.pt`) or a Hugging Face repository name like `fengxuyoung/MLIP-MC` (or `hf://fengxuyoung/MLIP-MC`). Missing files are automatically downloaded and cached. The model format should match your installed backend (FAIRChem `.pt` files or MACE `.model` files).
+- `--model`: Path to MLIP model file **(required)**. Can be a local path or a Hugging Face URI (e.g., `hf://your-org/your-repo` or `hf://your-org/your-repo:model.pt`). When using the `hf://` scheme, files are automatically downloaded and cached. The model format should match your installed backend (FAIRChem `.pt` files or MACE `.model` files).
 - `--output-dir`: Output directory (default: results)
 - `--write-trajectory`: Specifies to write out simulation trajectory every `--trajectory-interval` steps (default: False)
 - `--trajectory-interval`: Interval for saving structures into trajectory file (default: 100)
@@ -97,7 +99,7 @@ mlip_mc \\
 - `--gpu-id`: GPU device ID to use (for Widom mode, default: 0, use -1 for CPU)
 - `overwrite_checkpoints`: Specifies to overwrite checkpoint files every `--checkpoint-interval` steps (default: False)
 
-**Model caching:** Hugging Face downloads are cached under `~/.cache/mlip-mc/<repo>/<filename>` (or a custom directory set via the `MLIP_MC_CACHE` environment variable). Subsequent runs reuse the cached file even when launched from different working directories.
+**Model caching:** When using the `hf://` scheme, downloads are cached under `~/.cache/mlip-mc/<repo>/<filename>` (or a custom directory set via the `MLIP_MC_CACHE` environment variable). Subsequent runs reuse the cached file even when launched from different working directories.
 
 **Note:** The adsorbate name for EOS (fugacity) calculation is automatically determined:
 - If `--adsorbate-molecule` is provided, that name is used to match with the fugacity table
@@ -121,7 +123,7 @@ results = run_gcmc(
     pressure_points=[0.1, 1.0, 5.0],
     n_equilibration_steps=10000,
     n_production_steps=20000,
-    model_path="fengxuyoung/MLIP-MC",
+    model_path="models/model.pt",  # or use hf://your-org/your-repo
     output_dir="results",
     write_trajectory=True,
     trajectory_interval=100,
@@ -145,7 +147,7 @@ results = run_widom(
     adsorbate_molecule="CO2",
     temperature=298.0,
     n_trials=10000,
-    model_path="",
+    model_path="models/model.pt",  # or use hf://your-org/your-repo
     output_dir="widom_results"
 )
 ```

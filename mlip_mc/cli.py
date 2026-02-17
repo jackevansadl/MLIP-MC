@@ -98,8 +98,8 @@ Examples:
                         help='Number of production steps for GCMC (default: 20000)')
     parser.add_argument('--n-trials', type=int, default=10000,
                         help='Number of Widom insertion trials (default: 10000)')
-    parser.add_argument('--model', type=str, default='models/model.pt',
-                        help='Path to MLIP model file. Can be a local path or Hugging Face repo (e.g., fengxuyoung/MLIP-MC). Missing files auto-download and are cached.')
+    parser.add_argument('--model', type=str, required=True,
+                        help='Path to MLIP model file (required). Can be a local path or Hugging Face URI (e.g., hf://your-org/your-repo).')
     parser.add_argument('--hf-token', type=str, default=None,
                         help='Hugging Face authentication token (optional, uses cached token if available)')
     parser.add_argument('--output-dir', type=str, default='results',

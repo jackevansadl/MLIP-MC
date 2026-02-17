@@ -29,9 +29,7 @@ from ase.data import vdw_radii
 # until inside the process to ensure CUDA environment variables take effect first.
 
 
-DEFAULT_HF_REPO = "fengxuyoung/MLIP-MC"
 DEFAULT_HF_FILENAME = "model.pt"
-DEFAULT_LOCAL_MODEL = "models/model.pt"
 # Cache root directory: use MLIP_MC_CACHE env var if set, otherwise ~/.cache/mlip-mc
 _cache_dir = os.environ.get("MLIP_MC_CACHE")
 if _cache_dir:
@@ -56,8 +54,8 @@ def _copy_model_to_target(downloaded_path: str, target_path: str) -> str:
 
 def download_model_from_huggingface(
     model_path: str,
-    repo_id: str = DEFAULT_HF_REPO,
-    filename: Optional[str] = None,
+    repo_id: str,
+    filename: str,
     token: Optional[str] = None
 ) -> str:
     """
@@ -81,8 +79,6 @@ def download_model_from_huggingface(
     """
     if os.path.exists(model_path):
         return model_path
-    
-    filename = filename or DEFAULT_HF_FILENAME
     
     # Always use cache directory for downloads to ensure consistent caching
     # as documented: ~/.cache/mlip-mc/<repo>/<filename>
@@ -229,23 +225,28 @@ def _print_table(headers, rows, width=70):
     print("└" + "─" * (total_width - 2) + "┘")
 
 
-def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str, bool]:
+def _resolve_model_spec(model_spec: str) -> Tuple[str, Optional[str], Optional[str], bool]:
     """
-    Normalize the model argument into a local path plus (optional) Hugging Face filename.
+    Normalize the model argument into a local path plus (optional) Hugging Face info.
+
+    Users must provide either a local filesystem path or an explicit ``hf://``
+    URI.  There is no default Hugging Face repository.
 
     Returns
     -------
-    tuple[str, str, str, bool]
+    tuple[str, str | None, str | None, bool]
         (local_path, repo_id, hf_filename, is_hf)
         - local_path : normalized local filesystem path
-        - repo_id    : Hugging Face repo id if applicable (or DEFAULT_HF_REPO for
-                       legacy/local paths that may auto-download a fairchem model)
-        - hf_filename: filename within the repo
+        - repo_id    : Hugging Face repo id if applicable, None for local paths
+        - hf_filename: filename within the repo, None for local paths
         - is_hf      : True if the user explicitly requested an HF model via the
                        ``hf://`` scheme, False otherwise
     """
     if not model_spec:
-        model_spec = DEFAULT_LOCAL_MODEL
+        raise ValueError(
+            "model_path is required. Provide a local path to your model file "
+            "or an explicit Hugging Face URI (e.g., hf://your-org/your-repo)."
+        )
 
     model_spec = model_spec.strip()
 
@@ -261,12 +262,20 @@ def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str, bool]:
     if model_spec.startswith(HF_PREFIX):
         spec = model_spec[len(HF_PREFIX):].strip()
         if not spec:
-            spec = DEFAULT_HF_REPO
+            raise ValueError(
+                "Empty Hugging Face URI. Provide a repo id, "
+                "e.g., hf://your-org/your-repo or hf://your-org/your-repo:model.pt"
+            )
 
         if ":" in spec:
             repo_part, file_part = spec.split(":", 1)
-            repo_id = repo_part.strip() or DEFAULT_HF_REPO
+            repo_id = repo_part.strip()
             hf_filename = file_part.strip() or DEFAULT_HF_FILENAME
+            if not repo_id:
+                raise ValueError(
+                    "Empty repo id in Hugging Face URI. "
+                    "Provide a repo id, e.g., hf://your-org/your-repo:model.pt"
+                )
         else:
             repo_id = spec
             hf_filename = DEFAULT_HF_FILENAME
@@ -276,12 +285,8 @@ def _resolve_model_spec(model_spec: str) -> Tuple[str, str, str, bool]:
         local_path = MODEL_CACHE_ROOT / repo_id / hf_filename
         return str(local_path), repo_id, hf_filename, True
 
-    basename = os.path.basename(model_spec)
-    hf_filename = basename if basename else DEFAULT_HF_FILENAME
-    # For non-HF specs we keep DEFAULT_HF_REPO for potential fairchem
-    # auto-downloads, but mark is_hf = False so callers can restrict this
-    # behavior to appropriate backends.
-    return model_spec, DEFAULT_HF_REPO, hf_filename, False
+    # Local path — no Hugging Face info.
+    return model_spec, None, None, False
 
 
 def _format_device_str(gpu_id: Union[int, str]) -> str:
@@ -632,13 +637,13 @@ def _normalize_pressure_points(pressure_points: Union[float, List[float]]) -> Li
 
 def run_gcmc(
     adsorbent_path: str,
+    model_path: str,
     adsorbate_path: Optional[str] = None,
     adsorbate_molecule: Optional[str] = None,
     temperature: float = 298.0,
     pressure_points: Optional[Union[float, List[float]]] = None,
     n_equilibration_steps: int = 10000,
     n_production_steps: int = 20000,
-    model_path: str = "models/model.pt",
     output_dir: str = 'results',
     hf_token: Optional[str] = None,
     checkpoint_interval: int = 10000,
@@ -668,10 +673,10 @@ def run_gcmc(
         Number of Monte Carlo steps for equilibration (default: 10000)
     n_production_steps : int, optional
         Number of Monte Carlo steps for production/data collection (default: 20000)
-    model_path : str, optional
-        Path to MLIP model file (default: "models/model.pt").
-        Can be a local path or a Hugging Face repository name (e.g., "fengxuyoung/MLIP-MC").
-        Missing files are automatically downloaded from Hugging Face and cached.
+    model_path : str
+        Path to the MLIP model file (required).
+        Can be a local path or a Hugging Face URI (e.g., "hf://your-org/your-repo").
+        When using the ``hf://`` scheme, files are downloaded and cached automatically.
     output_dir : str, optional
         Directory to save results (default: 'results')
     hf_token : str, optional
@@ -724,19 +729,8 @@ def run_gcmc(
 
     _print_subsection("Model Configuration")
 
-    # Decide whether to use Hugging Face caching / auto-download logic.
-    #
-    # Rules:
-    #   - If the user explicitly requested an HF model (is_hf=True), always
-    #     honor that, regardless of backend.
-    #   - If the model path is a plain local path (is_hf=False), we only
-    #     auto-resolve to the default HF fairchem model for the *fairchem*
-    #     backend. Other backends (e.g., 'orb-models') will treat the path
-    #     as a normal local weights file and will *not* silently reuse the
-    #     cached fairchem checkpoint.
-    use_hf_cache = is_hf or (backend == 'fairchem')
-
-    if use_hf_cache:
+    if is_hf:
+        # User explicitly requested a Hugging Face model via hf:// scheme.
         cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
         if os.path.exists(cache_path):
             model_path = str(cache_path)
@@ -761,14 +755,8 @@ def run_gcmc(
         else:
             _print_info("Model Status", f"Found at {model_path}")
     else:
-        # Non-fairchem backends with a plain local path: do not transparently
-        # redirect to the default HF fairchem model.
+        # Local path provided.
         if not os.path.exists(model_path):
-            # For orb-models the pretrained weights are fetched automatically,
-            # so a missing local path is not necessarily an error unless the
-            # user explicitly passed a (nonexistent) override. We keep the
-            # behavior simple: if the file is missing, we fall back to the
-            # default orb_models checkpoint logic.
             if backend == 'orb-models':
                 _print_info(
                     "Model Status",
@@ -779,9 +767,8 @@ def run_gcmc(
             else:
                 raise FileNotFoundError(
                     f"Model file not found at {model_path}\n"
-                    "For non-fairchem backends, please provide a valid local "
-                    "weights checkpoint path or an explicit Hugging Face model via "
-                    "the 'hf://' scheme."
+                    "Please provide a valid local model path or use the "
+                    "'hf://' scheme to download from Hugging Face."
                 )
         else:
             _print_info("Model Status", f"Using local model at {model_path}")
@@ -941,11 +928,11 @@ def run_gcmc(
 
 def run_widom(
     adsorbent_path: str,
+    model_path: str,
     adsorbate_path: Optional[str] = None,
     adsorbate_molecule: Optional[str] = None,
     temperature: float = 298.0,
     n_trials: int = 10000,
-    model_path: str = "models/model.pt",
     output_dir: str = 'results',
     hf_token: Optional[str] = None,
     gpu_id: Union[int, str] = 0
@@ -967,10 +954,10 @@ def run_widom(
         Temperature in Kelvin (default: 298.0)
     n_trials : int, optional
         Number of Widom insertion trials (default: 10000)
-    model_path : str, optional
-        Path to MLIP model file (default: "models/model.pt").
-        Can be a local path or a Hugging Face repository name (e.g., "fengxuyoung/MLIP-MC").
-        Missing files are automatically downloaded from Hugging Face and cached.
+    model_path : str
+        Path to the MLIP model file (required).
+        Can be a local path or a Hugging Face URI (e.g., "hf://your-org/your-repo").
+        When using the ``hf://`` scheme, files are downloaded and cached automatically.
     output_dir : str, optional
         Directory to save results (default: 'results')
     hf_token : str, optional
@@ -1015,10 +1002,8 @@ def run_widom(
     
     _print_subsection("Model Configuration")
     
-    # Handle model caching/downloading
-    use_hf_cache = is_hf or (backend == 'fairchem')
-    
-    if use_hf_cache:
+    if is_hf:
+        # User explicitly requested a Hugging Face model via hf:// scheme.
         cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
         if os.path.exists(cache_path):
             model_path = str(cache_path)
@@ -1043,6 +1028,7 @@ def run_widom(
         else:
             _print_info("Model Status", f"Found at {model_path}")
     else:
+        # Local path provided.
         if not os.path.exists(model_path):
             if backend == 'orb-models':
                 _print_info(
@@ -1054,9 +1040,8 @@ def run_widom(
             else:
                 raise FileNotFoundError(
                     f"Model file not found at {model_path}\n"
-                    "For non-fairchem backends, please provide a valid local "
-                    "weights checkpoint path or an explicit Hugging Face model via "
-                    "the 'hf://' scheme."
+                    "Please provide a valid local model path or use the "
+                    "'hf://' scheme to download from Hugging Face."
                 )
         else:
             _print_info("Model Status", f"Using local model at {model_path}")
@@ -1210,8 +1195,8 @@ Examples:
                         help='Number of equilibration steps (default: 10000)')
     parser.add_argument('--n-prod', type=int, default=20000,
                         help='Number of production steps (default: 20000)')
-    parser.add_argument('--model', type=str, default='models/model.pt',
-                        help='Path to MLIP model file. Can be a local path or Hugging Face repo (e.g., fengxuyoung/MLIP-MC). Missing files auto-download and are cached.')
+    parser.add_argument('--model', type=str, required=True,
+                        help='Path to MLIP model file (required). Can be a local path or Hugging Face URI (e.g., hf://your-org/your-repo).')
     parser.add_argument('--hf-token', type=str, default=None,
                         help='Hugging Face authentication token (optional, uses cached token if available)')
     parser.add_argument('--output-dir', type=str, default='results',

@@ -37,8 +37,8 @@ def main() -> None:
     # Number of Widom insertion trials
     n_trials = 10000
     
-    # Model path (can be local path or HuggingFace repo)
-    model_path = "fengxuyoung/MLIP-MC"  # or "models/model.pt" for local file
+    # Model path — provide your own local path or HuggingFace URI (hf://your-org/your-repo)
+    model_path = "models/model.pt"  # CHANGE THIS to your model path
     
     # Output directory
     output_dir = example_dir / "results"
