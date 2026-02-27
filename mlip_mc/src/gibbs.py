@@ -21,6 +21,7 @@ TRANSLATION_STEP = 0.5
 ROTATION_CIRCLEFRAC = 0.1
 
 GIBBS_MOVE_PROBABILITIES = {
+    'md_thermalization': 0.00,
     'translation': 0.40,
     'rotation': 0.70,
     'volume': 0.80,
@@ -36,10 +37,21 @@ class MLP_Gibbs:
     particles at constant total N, V, and T. Machine-learned interatomic
     potentials provide energy evaluations.
 
+    Follows the Gibbs Ensemble MC framework described by Heijmans et al.
+    (2021) for reactive force fields, with support for both traditional
+    MC moves (translation/rotation) and NVT MD thermalization.
+
+    References
+    ----------
+    Heijmans, J. et al., "Gibbs Ensemble Monte Carlo for Reactive Force
+    Fields to Determine the Vapor-Liquid Equilibrium of CO2 and H2O",
+    J. Chem. Theory Comput. 2021, 17, 322-329.
+
     Parameters
     ----------
     model : calculator
-        ASE calculator (MLIP backend)
+        ASE calculator (MLIP backend). Must support forces for MD
+        thermalization moves.
     atoms_mol : Atoms
         Single molecule template
     T : float
@@ -57,14 +69,23 @@ class MLP_Gibbs:
     vdw_radii : array_like
         Van der Waals radii indexed by atomic number
     move_probabilities : dict, optional
-        Cumulative move probabilities. Keys: 'translation', 'rotation',
-        'volume', 'swap'. Values must be increasing and end at 1.0.
+        Cumulative move probabilities. Keys: 'md_thermalization',
+        'translation', 'rotation', 'volume', 'swap'. Values must be
+        increasing and end at 1.0. Default has md_thermalization=0.0
+        (traditional MC). Set md_thermalization > 0 and reduce
+        translation/rotation to enable MD-based thermalization.
     max_delta_V : float, optional
         Maximum volume change per move in A^3 (default: 50.0)
     translation_step : float, optional
         Translation step size in Angstrom (default: 0.5)
     rotation_circlefrac : float, optional
         Fraction of full rotation circle (default: 0.1)
+    md_timestep : float, optional
+        MD timestep in femtoseconds (default: 0.25)
+    md_steps : int, optional
+        Number of MD steps per thermalization move (default: 2500)
+    md_friction : float, optional
+        Langevin friction coefficient in 1/fs (default: 0.01)
     debug : bool, optional
         Enable debug printing (default: False)
     output_dir : str, optional
@@ -98,6 +119,9 @@ class MLP_Gibbs:
         max_delta_V=50.0,
         translation_step=0.5,
         rotation_circlefrac=0.1,
+        md_timestep=0.25,
+        md_steps=2500,
+        md_friction=0.01,
         debug=False,
         output_dir='results',
         n_equilibration_steps=None,
@@ -119,6 +143,9 @@ class MLP_Gibbs:
         self.max_delta_V = max_delta_V
         self.translation_step = translation_step
         self.rotation_circlefrac = rotation_circlefrac
+        self.md_timestep = md_timestep
+        self.md_steps = md_steps
+        self.md_friction = md_friction
         self.n_equilibration_steps = n_equilibration_steps
         self.n_production_steps = n_production_steps
         self.checkpoint_interval = checkpoint_interval
@@ -162,6 +189,7 @@ class MLP_Gibbs:
 
         # Move statistics
         self.moves = {
+            'md_thermalization': {'attempted': 0, 'accepted': 0},
             'translation': {'attempted': 0, 'accepted': 0},
             'rotation': {'attempted': 0, 'accepted': 0},
             'volume': {'attempted': 0, 'accepted': 0},
@@ -381,9 +409,80 @@ class MLP_Gibbs:
 
         return False
 
+    def _move_md_thermalization(self):
+        """
+        Perform NVT molecular dynamics thermalization on both boxes.
+
+        Following Heijmans et al. (2021), uses NVT MD trajectories to
+        thermalize both simulation boxes. This move is always accepted
+        as MD properly samples the canonical (NVT) ensemble.
+
+        The paper uses Nosé-Hoover thermostat with velocity Verlet
+        integration (625 fs trajectory, 0.25 fs timestep = 2500 steps).
+        This implementation uses Langevin dynamics as the NVT thermostat.
+
+        Returns
+        -------
+        bool
+            Always True (MD thermalization is always accepted)
+        """
+        from ase.md.langevin import Langevin
+        from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+        from ase import units
+
+        for box_id in [1, 2]:
+            if box_id == 1:
+                atoms = self.atoms_box1
+                N = self.N1
+            else:
+                atoms = self.atoms_box2
+                N = self.N2
+
+            if N == 0:
+                continue
+
+            # Work on a copy for safety
+            atoms_md = atoms.copy()
+            atoms_md.info["charge"] = 0
+            atoms_md.info["spin"] = 1
+            atoms_md.calc = self.model
+
+            # Initialize velocities from Maxwell-Boltzmann distribution
+            MaxwellBoltzmannDistribution(atoms_md, temperature_K=self.T)
+
+            # Create Langevin dynamics (NVT thermostat)
+            dyn = Langevin(
+                atoms_md,
+                timestep=self.md_timestep * units.fs,
+                temperature_K=self.T,
+                friction=self.md_friction / units.fs,
+            )
+
+            # Run MD trajectory
+            dyn.run(self.md_steps)
+
+            # Update box state (always accepted)
+            # Recompute energy after thermalization
+            e_new = atoms_md.get_potential_energy()
+
+            if box_id == 1:
+                self.atoms_box1 = atoms_md
+                self.E1 = e_new
+            else:
+                self.atoms_box2 = atoms_md
+                self.E2 = e_new
+
+        self.moves['md_thermalization']['accepted'] += 1
+        self._debug_print('Accepted MD thermalization on both boxes')
+        return True
+
     def _move_volume(self):
         """
         Perform a coupled volume change move preserving total volume.
+
+        Acceptance criterion (Eq. 7 of Heijmans et al., 2021):
+            acc(o->n) = min(1, (V1_new/V1)^N1 * (V2_new/V2)^N2
+                         * exp(-beta * (U_new - U_old)))
 
         Returns
         -------
@@ -458,6 +557,11 @@ class MLP_Gibbs:
     def _move_swap(self):
         """
         Transfer a molecule from one box to the other.
+
+        Acceptance criterion (Eq. 6 of Heijmans et al., 2021):
+            acc(o->n) = min(1, (N_source * V_target) /
+                         ((N_target + 1) * V_source)
+                         * exp(-beta * (U_new - U_old)))
 
         Returns
         -------
@@ -704,7 +808,11 @@ class MLP_Gibbs:
             self.V2 = restart_data.get('V2', self.V2)
             self.E1 = restart_data.get('E1', 0.0)
             self.E2 = restart_data.get('E2', 0.0)
-            self.moves = restart_data.get('moves', self.moves)
+            loaded_moves = restart_data.get('moves', self.moves)
+            # Ensure md_thermalization key exists for backward compatibility
+            if 'md_thermalization' not in loaded_moves:
+                loaded_moves['md_thermalization'] = {'attempted': 0, 'accepted': 0}
+            self.moves = loaded_moves
 
             rejections = restart_data.get('rejections', {})
             self.swap_rejected_vdw = rejections.get('swap_vdw', 0)
@@ -750,15 +858,24 @@ class MLP_Gibbs:
         print("  |" + " Gibbs Ensemble MC Move Statistics".center(66) + "|")
         print("  +" + "-" * 66 + "+")
 
+        # Display-friendly names
+        display_names = {
+            'md_thermalization': 'MD Therm.',
+            'translation': 'Translation',
+            'rotation': 'Rotation',
+            'volume': 'Volume',
+            'swap': 'Swap',
+        }
+
         for move_type, stats in self.moves.items():
             attempted = stats['attempted']
             accepted = stats['accepted']
+            name = display_names.get(move_type, move_type.capitalize())
             if attempted > 0:
                 rate = (accepted / attempted) * 100
-                name = move_type.capitalize()
                 print(f"  | {name:<13} Attempted: {attempted:<7} Accepted: {accepted:<7} Rate: {rate:>6.2f}% |")
             else:
-                print(f"  | {move_type.capitalize():<13} Not attempted{'':<37} |")
+                print(f"  | {name:<13} Not attempted{'':<37} |")
 
         print("  +" + "-" * 66 + "+")
         stats_lines = [
@@ -855,19 +972,29 @@ class MLP_Gibbs:
 
         probs = self.move_probabilities
 
+        # Resolve cumulative probability thresholds with backward compatibility
+        p_md = probs.get('md_thermalization', 0.0)
+        p_trans = probs.get('translation', p_md)
+        p_rot = probs.get('rotation', p_trans)
+        p_vol = probs.get('volume', p_rot)
+
         for iteration in range(steps_to_run):
             success = False
             switch = np.random.rand()
 
-            if switch < probs['translation']:
+            if switch < p_md:
+                self.moves['md_thermalization']['attempted'] += 1
+                success = self._move_md_thermalization()
+
+            elif switch < p_trans:
                 self.moves['translation']['attempted'] += 1
                 success = self._move_translation()
 
-            elif switch < probs['rotation']:
+            elif switch < p_rot:
                 self.moves['rotation']['attempted'] += 1
                 success = self._move_rotation()
 
-            elif switch < probs['volume']:
+            elif switch < p_vol:
                 self.moves['volume']['attempted'] += 1
                 success = self._move_volume()
 

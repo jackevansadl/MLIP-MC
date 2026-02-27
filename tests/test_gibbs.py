@@ -14,8 +14,24 @@ from mlip_mc.src.gibbs import MLP_Gibbs, GIBBS_MOVE_PROBABILITIES
 from mlip_mc.src.utilities import read_gibbs_binary_log
 from ase import Atoms
 from ase.build import molecule
+from ase.calculators.calculator import Calculator, all_changes
 from ase.data import vdw_radii
 from ase.units import kB
+
+
+class ZeroCalculator(Calculator):
+    """ASE calculator that returns zero energy and zero forces.
+
+    Used for testing MD thermalization moves where the model must
+    support both energy and force calculations.
+    """
+    implemented_properties = ['energy', 'forces']
+
+    def calculate(self, atoms=None, properties=['energy'],
+                  system_changes=all_changes):
+        super().calculate(atoms, properties, system_changes)
+        self.results['energy'] = 0.0
+        self.results['forces'] = np.zeros((len(atoms), 3))
 
 
 class TestMLPGibbsInit:
@@ -78,7 +94,7 @@ class TestMLPGibbsInit:
             vdw_radii=zero_vdw,
         )
 
-        for move_type in ['translation', 'rotation', 'volume', 'swap']:
+        for move_type in ['md_thermalization', 'translation', 'rotation', 'volume', 'swap']:
             assert move_type in gibbs.moves
             assert gibbs.moves[move_type]['attempted'] == 0
             assert gibbs.moves[move_type]['accepted'] == 0
@@ -600,6 +616,178 @@ class TestTranslationAndRotation:
         assert accepted > 0
 
 
+class TestMDThermalization:
+    """Tests for NVT MD thermalization moves."""
+
+    @pytest.fixture
+    def gibbs_with_md(self):
+        """Create a Gibbs instance configured for MD thermalization."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=3,
+            N2_init=3,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_timestep=0.25,
+            md_steps=10,  # Very short for testing
+            md_friction=0.01,
+        )
+        g.E1 = 0.0
+        g.E2 = 0.0
+        return g
+
+    def test_md_thermalization_always_accepted(self, gibbs_with_md):
+        """Test that MD thermalization is always accepted."""
+        np.random.seed(42)
+        for _ in range(5):
+            gibbs_with_md.moves['md_thermalization']['attempted'] += 1
+            result = gibbs_with_md._move_md_thermalization()
+            assert result is True
+
+        assert gibbs_with_md.moves['md_thermalization']['accepted'] == 5
+
+    def test_md_preserves_atom_count(self, gibbs_with_md):
+        """Test that MD thermalization preserves atom count in both boxes."""
+        n_atoms_box1_before = len(gibbs_with_md.atoms_box1)
+        n_atoms_box2_before = len(gibbs_with_md.atoms_box2)
+
+        np.random.seed(42)
+        gibbs_with_md._move_md_thermalization()
+
+        assert len(gibbs_with_md.atoms_box1) == n_atoms_box1_before
+        assert len(gibbs_with_md.atoms_box2) == n_atoms_box2_before
+
+    def test_md_preserves_cell(self, gibbs_with_md):
+        """Test that MD thermalization preserves box dimensions."""
+        cell1_before = gibbs_with_md.atoms_box1.get_cell().copy()
+        cell2_before = gibbs_with_md.atoms_box2.get_cell().copy()
+
+        np.random.seed(42)
+        gibbs_with_md._move_md_thermalization()
+
+        np.testing.assert_allclose(
+            gibbs_with_md.atoms_box1.get_cell(), cell1_before
+        )
+        np.testing.assert_allclose(
+            gibbs_with_md.atoms_box2.get_cell(), cell2_before
+        )
+
+    def test_md_updates_positions(self, gibbs_with_md):
+        """Test that MD thermalization changes positions."""
+        pos1_before = gibbs_with_md.atoms_box1.get_positions().copy()
+        pos2_before = gibbs_with_md.atoms_box2.get_positions().copy()
+
+        np.random.seed(42)
+        gibbs_with_md._move_md_thermalization()
+
+        # With Langevin dynamics at T=300K, positions should change
+        # (even with zero forces, thermal noise moves atoms)
+        pos1_after = gibbs_with_md.atoms_box1.get_positions()
+        pos2_after = gibbs_with_md.atoms_box2.get_positions()
+
+        assert not np.allclose(pos1_before, pos1_after)
+        assert not np.allclose(pos2_before, pos2_after)
+
+    def test_md_with_empty_box(self):
+        """Test that MD thermalization handles empty boxes gracefully."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=0,
+            N2_init=3,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_steps=10,
+        )
+        g.E1 = 0.0
+        g.E2 = 0.0
+
+        # Should succeed even with one empty box
+        g.moves['md_thermalization']['attempted'] += 1
+        result = g._move_md_thermalization()
+        assert result is True
+        assert len(g.atoms_box1) == 0  # Still empty
+
+    def test_md_parameters_stored(self):
+        """Test that MD parameters are stored correctly."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=1,
+            N2_init=1,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_timestep=0.5,
+            md_steps=1000,
+            md_friction=0.02,
+        )
+
+        assert g.md_timestep == 0.5
+        assert g.md_steps == 1000
+        assert g.md_friction == 0.02
+
+    def test_md_in_probability_chain(self):
+        """Test that MD thermalization is selected when probabilities are set."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=3,
+            N2_init=3,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_steps=5,
+            move_probabilities={
+                'md_thermalization': 1.0,
+                'translation': 1.0,
+                'rotation': 1.0,
+                'volume': 1.0,
+                'swap': 1.0,
+            },
+        )
+
+        g.E1 = 0.0
+        g.E2 = 0.0
+
+        # With md_thermalization=1.0, all moves should be MD
+        for _ in range(10):
+            switch = np.random.rand()
+            if switch < 1.0:  # Always true
+                g.moves['md_thermalization']['attempted'] += 1
+                g._move_md_thermalization()
+
+        assert g.moves['md_thermalization']['attempted'] == 10
+        assert g.moves['md_thermalization']['accepted'] == 10
+
+
 class TestBinaryLog:
     """Tests for binary logging and reading."""
 
@@ -782,6 +970,8 @@ class TestStatistics:
         g.moves['translation']['accepted'] = 40
         g.moves['swap']['attempted'] = 50
         g.moves['swap']['accepted'] = 10
+        g.moves['md_thermalization']['attempted'] = 20
+        g.moves['md_thermalization']['accepted'] = 20
 
         g._print_statistics()
 
@@ -789,6 +979,7 @@ class TestStatistics:
         assert "Gibbs Ensemble MC Move Statistics" in captured.out
         assert "Translation" in captured.out
         assert "Swap" in captured.out
+        assert "MD Therm." in captured.out
         assert "Final State" in captured.out
 
 

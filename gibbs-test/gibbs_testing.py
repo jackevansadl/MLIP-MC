@@ -110,7 +110,10 @@ def main() -> None:
         output_dir=str(output_dir),
         checkpoint_interval=5000,
         write_trajectory=True,
-        trajectory_interval=100,
+        trajectory_interval=10,
+        # md_steps=10,
+        # md_timestep=0.5,
+        move_probabilities={'md_thermalization': 0.00, 'translation': 0.40, 'rotation': 0.70, 'volume': 0.80, 'swap': 1.00}
     )
 
     total_steps = n_equilibration_steps + n_production_steps
