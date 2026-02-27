@@ -403,6 +403,59 @@ def read_binary_log(log_path: str) -> List[Dict[str, Any]]:
     return data
 
 
+def read_gibbs_binary_log(log_path: str) -> List[Dict[str, Any]]:
+    """
+    Read binary log file from Gibbs ensemble simulation.
+
+    Parameters
+    ----------
+    log_path : str
+        Path to the binary log file (e.g., 'results/log_gibbs_300.0K.bin')
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        List of dictionaries, each containing:
+        - 'step': int - step number
+        - 'N1': int - molecules in box 1
+        - 'N2': int - molecules in box 2
+        - 'V1': float - volume of box 1 (A^3)
+        - 'V2': float - volume of box 2 (A^3)
+        - 'E1': float - energy of box 1 (eV)
+        - 'E2': float - energy of box 2 (eV)
+        - 'rho1': float - number density of box 1
+        - 'rho2': float - number density of box 2
+    """
+    data = []
+    fmt = "iiidddddd"
+    record_size = struct.calcsize(fmt)
+
+    try:
+        with open(log_path, "rb") as f:
+            while True:
+                chunk = f.read(record_size)
+                if len(chunk) < record_size:
+                    break
+                step, N1, N2, V1, V2, E1, E2, rho1, rho2 = struct.unpack(fmt, chunk)
+                data.append({
+                    'step': step,
+                    'N1': N1,
+                    'N2': N2,
+                    'V1': V1,
+                    'V2': V2,
+                    'E1': E1,
+                    'E2': E2,
+                    'rho1': rho1,
+                    'rho2': rho2,
+                })
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Log file not found: {log_path}")
+    except Exception as e:
+        raise ValueError(f"Error reading binary log {log_path}: {e}")
+
+    return data
+
+
 def read_widom_binary_log(log_path: str) -> List[Dict[str, Any]]:
     """
     Read binary log file from Widom insertion simulation and return list of records with trajectory data.
