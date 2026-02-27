@@ -114,6 +114,8 @@ Examples:
                         help='Interval for writing structures (default: 100)')
     parser.add_argument('--overwrite-checkpoints', action='store_true',
                         help='Write trajectory files')
+    parser.add_argument('--orb-variant', type=str, default='omat', choices=['omat', 'omol'],
+                        help='ORB model variant: omat (default, orb_v3_conservative_inf_omat) or omol (orb_v3_conservative_omol, charge=0 spin=1)')
     return parser.parse_args()
 
 
@@ -151,7 +153,8 @@ def main() -> None:
                 model_path=args.model,
                 output_dir=args.output_dir,
                 hf_token=args.hf_token,
-                gpu_id=gpu_id
+                gpu_id=gpu_id,
+                orb_model_variant=args.orb_variant,
             )
         else:
             # GCMC mode
@@ -182,8 +185,7 @@ def main() -> None:
                 write_trajectory=args.write_trajectory,
                 trajectory_interval=args.trajectory_interval,
                 overwrite_checkpoints=args.overwrite_checkpoints,
-
-
+                orb_model_variant=args.orb_variant,
             )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)

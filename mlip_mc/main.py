@@ -330,10 +330,10 @@ def _detect_backend() -> str:
     )
 
 
-def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> Any:
+def _load_model(model_path: str, device: str, backend: Optional[str] = None, orb_model_variant: str = 'omat') -> Any:
     """
     Load an MLIP model using the appropriate backend.
-    
+
     Parameters
     ----------
     model_path : str
@@ -343,7 +343,10 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> 
         Device to use ('cuda' or 'cpu')
     backend : str, optional
         Backend to use ('fairchem', 'mace-torch', or 'orb-models'). If None, auto-detects.
-    
+    orb_model_variant : str, optional
+        ORB model variant to use: 'omat' for orb_v3_conservative_inf_omat (default)
+        or 'omol' for orb_v3_conservative_omol (requires charge=0, spin=1).
+
     Returns
     -------
     Any
@@ -351,55 +354,60 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None) -> 
     """
     if backend is None:
         backend = _detect_backend()
-    
+
     if backend == 'fairchem':
         from fairchem.core import FAIRChemCalculator
         from fairchem.core.units.mlip_unit import load_predict_unit
-        
+
         predictor = load_predict_unit(model_path, device=device)
         model = FAIRChemCalculator(predictor, task_name="odac")
         return model
-    
+
     elif backend == 'mace-torch':
         from mace.calculators import mace_mp
-        
+
         # MACE uses 'cuda' or 'cpu' for device, same as fairchem
         # Convert device string if needed (should already be 'cuda' or 'cpu')
         mace_device = device if device in ('cuda', 'cpu') else 'cpu'
-        
+
         model = mace_mp(
             model=model_path,
             default_dtype="float64",
             device=mace_device
         )
         return model
-    
+
     elif backend == 'orb-models':
         from orb_models.forcefield import pretrained
         from orb_models.forcefield.calculator import ORBCalculator
 
+        # Select the pretrained loader based on the variant flag.
+        if orb_model_variant == 'omol':
+            _loader = pretrained.orb_v3_conservative_omol
+        else:
+            _loader = pretrained.orb_v3_conservative_inf_omat
+
         # ORB models normally download pretrained weights automatically. We make
         # ``weights_path`` optional so that:
-        #   - By default, pretrained.orb_v3_conservative_inf_omat(...) handles
-        #     downloading and caching.
+        #   - By default, the pretrained loader handles downloading and caching.
         #   - If the user provides ``--model some/orb/weights.pt`` and that file
         #     exists, we pass it through as ``weights_path`` to override the
         #     default checkpoint.
         if model_path is not None and os.path.exists(model_path):
-            orbff = pretrained.orb_v3_conservative_inf_omat(
+            orbff = _loader(
                 device=device,
                 precision="float32-high",
                 weights_path=model_path,
             )
         else:
-            orbff = pretrained.orb_v3_conservative_inf_omat(
+            orbff = _loader(
                 device=device,
                 precision="float32-high",
             )
 
         calc = ORBCalculator(orbff, device=device)
         return calc
-    
+
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -421,6 +429,7 @@ def run_single_pressure(
     write_trajectory: bool = False,
     trajectory_interval: int = 100,
     overwrite_checkpoints: bool = False,
+    orb_model_variant: str = 'omat',
 ) -> None:
     """
     Run GCMC simulation for a single pressure point on a specific GPU.
@@ -481,8 +490,8 @@ def run_single_pressure(
         backend = _detect_backend()
         device_str = _format_device_str(gpu_id)
         print(f"  [{device_str}] Using backend: {backend}")
-        model = _load_model(model_path, device=device, backend=backend)
-        
+        model = _load_model(model_path, device=device, backend=backend, orb_model_variant=orb_model_variant)
+
         P = P_bar * bar
         print(f"  [{device_str}] Starting simulation at P = {P_bar:.2f} bar")
         
@@ -648,8 +657,9 @@ def run_gcmc(
     hf_token: Optional[str] = None,
     checkpoint_interval: int = 10000,
     write_trajectory: bool = False,
-    trajectory_interval : int = 100,
-    overwrite_checkpoints : bool = False
+    trajectory_interval: int = 100,
+    overwrite_checkpoints: bool = False,
+    orb_model_variant: str = 'omat',
 ) -> Dict[str, Any]:
     """
     Run GCMC isotherm simulation for gas adsorption in a porous material.
@@ -785,6 +795,9 @@ def run_gcmc(
         cell=atoms_frame.cell,
         pbc=atoms_frame.pbc
     )
+
+    atoms_frame.info["charge"] = 0  # total charge
+    atoms_frame.info["spin"] = 1  #  spin multiplicity
     
     if adsorbate_path is not None:
         if not os.path.exists(adsorbate_path):
@@ -806,6 +819,9 @@ def run_gcmc(
         _print_info("Adsorbate Name", adsorbate_name)
     else:
         raise ValueError("Either adsorbate_path or adsorbate_molecule must be provided")
+    
+    atoms_ads.info["charge"] = 0  # total charge
+    atoms_ads.info["spin"] = 1  #  spin multiplicity
     
     if pressure_points is None:
         raise ValueError("pressure_points must be provided (float or list of floats)")
@@ -852,8 +868,9 @@ def run_gcmc(
         p = Process(target=run_single_pressure, args=(
             P_bar, temperature, model_path, atoms_frame, atoms_ads,
             n_equilibration_steps, n_production_steps, n_total_steps,
-            gpu_id, result_queue, adsorbate_name, output_dir, checkpoint_interval, 
-            write_trajectory, trajectory_interval, overwrite_checkpoints
+            gpu_id, result_queue, adsorbate_name, output_dir, checkpoint_interval,
+            write_trajectory, trajectory_interval, overwrite_checkpoints,
+            orb_model_variant,
         ))
         p.start()
         active_processes.append(p)
@@ -935,7 +952,8 @@ def run_widom(
     n_trials: int = 10000,
     output_dir: str = 'results',
     hf_token: Optional[str] = None,
-    gpu_id: Union[int, str] = 0
+    gpu_id: Union[int, str] = 0,
+    orb_model_variant: str = 'omat',
 ) -> Dict[str, Any]:
     """
     Run Widom insertion calculation for estimating Henry's constants and adsorption energies.
@@ -1058,6 +1076,8 @@ def run_widom(
         cell=atoms_frame.cell,
         pbc=atoms_frame.pbc
     )
+    atoms_frame.info["charge"] = 0  # total charge
+    atoms_frame.info["spin"] = 1  #  spin multiplicity
     
     if adsorbate_path is not None:
         if not os.path.exists(adsorbate_path):
@@ -1076,6 +1096,8 @@ def run_widom(
     else:
         raise ValueError("Either adsorbate_path or adsorbate_molecule must be provided")
     
+    atoms_ads.info["charge"] = 0  # total charge
+    atoms_ads.info["spin"] = 1  #  spin multiplicity
     _print_subsection("Simulation Parameters")
     _print_info("Temperature", f"{temperature} K")
     _print_info("Number of Trials", f"{n_trials}")
@@ -1102,11 +1124,11 @@ def run_widom(
     _print_info("Backend", backend)
     
     # Load model
-    model = _load_model(model_path, device=device, backend=backend)
-    
+    model = _load_model(model_path, device=device, backend=backend, orb_model_variant=orb_model_variant)
+
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Create Widom instance
     widom = MLP_Widom(
         model=model,
@@ -1209,6 +1231,8 @@ Examples:
                         help='Interval for writing structures (default: 100)')
     parser.add_argument('--overwrite-checkpoints', action='store_true',
                         help='Write trajectory files')
+    parser.add_argument('--orb-variant', type=str, default='omat', choices=['omat', 'omol'],
+                        help='ORB model variant: omat (default, orb_v3_conservative_inf_omat) or omol (orb_v3_conservative_omol, charge=0 spin=1)')
     return parser.parse_args()
 
 
@@ -1280,7 +1304,8 @@ def main() -> None:
             checkpoint_interval=args.checkpoint_interval,
             write_trajectory=args.write_trajectory,
             trajectory_interval=args.trajectory_interval,
-            overwrite_checkpoints = args.overwrite_checkpoints
+            overwrite_checkpoints=args.overwrite_checkpoints,
+            orb_model_variant=args.orb_variant,
         )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)
