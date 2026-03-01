@@ -113,7 +113,7 @@ def main() -> None:
         trajectory_interval=10,
         # md_steps=10,
         # md_timestep=0.5,
-        move_probabilities={'md_thermalization': 0.00, 'translation': 0.40, 'rotation': 0.70, 'volume': 0.80, 'swap': 1.00}
+        move_probabilities={'md_thermalization': 0.33, 'translation': 0.33, 'rotation': 0.33, 'volume': 0.66, 'swap': 1.00}
     )
 
     total_steps = n_equilibration_steps + n_production_steps

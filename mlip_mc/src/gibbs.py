@@ -119,9 +119,9 @@ class MLP_Gibbs:
         max_delta_V=50.0,
         translation_step=0.5,
         rotation_circlefrac=0.1,
-        md_timestep=0.25,
-        md_steps=2500,
-        md_friction=0.01,
+        md_timestep=1.0,
+        md_steps=1000,
+        md_damp=100,
         debug=False,
         output_dir='results',
         n_equilibration_steps=None,
@@ -145,7 +145,7 @@ class MLP_Gibbs:
         self.rotation_circlefrac = rotation_circlefrac
         self.md_timestep = md_timestep
         self.md_steps = md_steps
-        self.md_friction = md_friction
+        self.md_damp = md_damp
         self.n_equilibration_steps = n_equilibration_steps
         self.n_production_steps = n_production_steps
         self.checkpoint_interval = checkpoint_interval
@@ -419,14 +419,13 @@ class MLP_Gibbs:
 
         The paper uses Nosé-Hoover thermostat with velocity Verlet
         integration (625 fs trajectory, 0.25 fs timestep = 2500 steps).
-        This implementation uses Langevin dynamics as the NVT thermostat.
 
         Returns
         -------
         bool
             Always True (MD thermalization is always accepted)
         """
-        from ase.md.langevin import Langevin
+        from ase.md.nose_hoover_chain import NoseHooverChainNVT
         from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
         from ase import units
 
@@ -451,11 +450,11 @@ class MLP_Gibbs:
             MaxwellBoltzmannDistribution(atoms_md, temperature_K=self.T)
 
             # Create Langevin dynamics (NVT thermostat)
-            dyn = Langevin(
+            dyn = NoseHooverChainNVT(
                 atoms_md,
                 timestep=self.md_timestep * units.fs,
                 temperature_K=self.T,
-                friction=self.md_friction / units.fs,
+                tdamp=self.md_damp / units.fs,
             )
 
             # Run MD trajectory
