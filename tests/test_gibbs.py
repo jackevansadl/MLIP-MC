@@ -638,7 +638,7 @@ class TestMDThermalization:
             vdw_radii=zero_vdw,
             md_timestep=0.25,
             md_steps=10,  # Very short for testing
-            md_friction=0.01,
+            md_damp=0.01,
         )
         g.E1 = 0.0
         g.E2 = 0.0
@@ -741,12 +741,12 @@ class TestMDThermalization:
             vdw_radii=zero_vdw,
             md_timestep=0.5,
             md_steps=1000,
-            md_friction=0.02,
+            md_damp=0.02,
         )
 
         assert g.md_timestep == 0.5
         assert g.md_steps == 1000
-        assert g.md_friction == 0.02
+        assert g.md_damp == 0.02
 
     def test_md_in_probability_chain(self):
         """Test that MD thermalization is selected when probabilities are set."""
@@ -786,6 +786,227 @@ class TestMDThermalization:
 
         assert g.moves['md_thermalization']['attempted'] == 10
         assert g.moves['md_thermalization']['accepted'] == 10
+
+
+class TestMDDebug:
+    """Tests for MD debug output (CSV files and summary)."""
+
+    @pytest.fixture
+    def temp_dir(self):
+        d = tempfile.mkdtemp()
+        yield d
+        shutil.rmtree(d)
+
+    @pytest.fixture
+    def gibbs_md_debug(self, temp_dir):
+        """Create a Gibbs instance with md_debug enabled."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=3,
+            N2_init=3,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_timestep=0.25,
+            md_steps=20,
+            md_debug=True,
+            md_debug_interval=5,
+            output_dir=temp_dir,
+        )
+        g.E1 = 0.0
+        g.E2 = 0.0
+        return g
+
+    def test_md_debug_creates_csv(self, gibbs_md_debug, temp_dir):
+        """Test that MD debug writes CSV files for each box."""
+        gibbs_md_debug.moves['md_thermalization']['attempted'] += 1
+        gibbs_md_debug._move_md_thermalization()
+
+        csv1 = os.path.join(temp_dir, 'md_debug', 'md_box1.csv')
+        csv2 = os.path.join(temp_dir, 'md_debug', 'md_box2.csv')
+        assert os.path.exists(csv1)
+        assert os.path.exists(csv2)
+
+    def test_md_debug_csv_header(self, gibbs_md_debug, temp_dir):
+        """Test that CSV has the correct header."""
+        gibbs_md_debug.moves['md_thermalization']['attempted'] += 1
+        gibbs_md_debug._move_md_thermalization()
+
+        csv1 = os.path.join(temp_dir, 'md_debug', 'md_box1.csv')
+        with open(csv1, 'r') as f:
+            header = f.readline().strip()
+        assert header == 'step,time_fs,T_inst,E_pot,E_kin,E_tot,max_force'
+
+    def test_md_debug_csv_has_data_rows(self, gibbs_md_debug, temp_dir):
+        """Test that CSV contains data rows (initial + sampled + final)."""
+        gibbs_md_debug.moves['md_thermalization']['attempted'] += 1
+        gibbs_md_debug._move_md_thermalization()
+
+        csv1 = os.path.join(temp_dir, 'md_debug', 'md_box1.csv')
+        with open(csv1, 'r') as f:
+            lines = f.readlines()
+        # header + data: step 0, 5, 10, 15, 20 = at least 5 data rows
+        assert len(lines) >= 4  # header + at least 3 data rows
+
+    def test_md_debug_csv_first_step_is_zero(self, gibbs_md_debug, temp_dir):
+        """Test that the first data row is step 0 (initial state)."""
+        gibbs_md_debug.moves['md_thermalization']['attempted'] += 1
+        gibbs_md_debug._move_md_thermalization()
+
+        csv1 = os.path.join(temp_dir, 'md_debug', 'md_box1.csv')
+        with open(csv1, 'r') as f:
+            _ = f.readline()  # skip header
+            first_data = f.readline().strip()
+        assert first_data.startswith('0,')
+
+    def test_md_debug_csv_last_step_is_md_steps(self, gibbs_md_debug, temp_dir):
+        """Test that the last data row corresponds to the final MD step."""
+        gibbs_md_debug.moves['md_thermalization']['attempted'] += 1
+        gibbs_md_debug._move_md_thermalization()
+
+        csv1 = os.path.join(temp_dir, 'md_debug', 'md_box1.csv')
+        with open(csv1, 'r') as f:
+            lines = f.readlines()
+        last_step = int(lines[-1].split(',')[0])
+        assert last_step == gibbs_md_debug.md_steps
+
+    def test_md_debug_csv_overwritten_each_move(self, gibbs_md_debug, temp_dir):
+        """Test that CSV is overwritten (not appended) each MD move."""
+        gibbs_md_debug.moves['md_thermalization']['attempted'] += 1
+        gibbs_md_debug._move_md_thermalization()
+
+        csv1 = os.path.join(temp_dir, 'md_debug', 'md_box1.csv')
+        with open(csv1, 'r') as f:
+            lines_after_first = len(f.readlines())
+
+        gibbs_md_debug.moves['md_thermalization']['attempted'] += 1
+        gibbs_md_debug._move_md_thermalization()
+
+        with open(csv1, 'r') as f:
+            lines_after_second = len(f.readlines())
+
+        # Should be same size (overwritten, not appended)
+        assert lines_after_first == lines_after_second
+
+    def test_md_debug_prints_summary(self, gibbs_md_debug, capsys):
+        """Test that MD debug prints equilibration summary to stdout."""
+        gibbs_md_debug.moves['md_thermalization']['attempted'] += 1
+        gibbs_md_debug._move_md_thermalization()
+
+        captured = capsys.readouterr()
+        assert '[MD Debug] Box 1' in captured.out
+        assert '[MD Debug] Box 2' in captured.out
+        assert 'T target' in captured.out
+        assert 'T (2nd half)' in captured.out
+        assert 'E_pot' in captured.out
+        assert 'E_tot drift' in captured.out
+
+    def test_md_debug_disabled_by_default(self, temp_dir):
+        """Test that no CSV is written when md_debug is False."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=3,
+            N2_init=3,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_steps=10,
+            output_dir=temp_dir,
+        )
+        g.E1 = 0.0
+        g.E2 = 0.0
+        g.moves['md_thermalization']['attempted'] += 1
+        g._move_md_thermalization()
+
+        assert not os.path.exists(os.path.join(temp_dir, 'md_debug'))
+
+    def test_md_debug_empty_box_skipped(self, temp_dir):
+        """Test that empty boxes don't produce CSV files."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=0,
+            N2_init=3,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_steps=10,
+            md_debug=True,
+            output_dir=temp_dir,
+        )
+        g.E1 = 0.0
+        g.E2 = 0.0
+        g.moves['md_thermalization']['attempted'] += 1
+        g._move_md_thermalization()
+
+        # Box 1 is empty, so no CSV for it
+        assert not os.path.exists(os.path.join(temp_dir, 'md_debug', 'md_box1.csv'))
+        # Box 2 has atoms, so CSV should exist
+        assert os.path.exists(os.path.join(temp_dir, 'md_debug', 'md_box2.csv'))
+
+    def test_md_debug_parameters_stored(self, temp_dir):
+        """Test that md_debug and md_debug_interval are stored."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=1,
+            N2_init=1,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_debug=True,
+            md_debug_interval=7,
+            output_dir=temp_dir,
+        )
+        assert g.md_debug is True
+        assert g.md_debug_interval == 7
+
+    def test_md_debug_interval_floor(self, temp_dir):
+        """Test that md_debug_interval is clamped to at least 1."""
+        zero_vdw = vdw_radii.copy()
+        zero_vdw[:] = 0.0
+
+        np.random.seed(42)
+        g = MLP_Gibbs(
+            model=ZeroCalculator(),
+            atoms_mol=molecule('H2'),
+            T=300,
+            N1_init=1,
+            N2_init=1,
+            L1_init=20.0,
+            L2_init=20.0,
+            device='cpu',
+            vdw_radii=zero_vdw,
+            md_debug_interval=0,
+            output_dir=temp_dir,
+        )
+        assert g.md_debug_interval == 1
 
 
 class TestBinaryLog:

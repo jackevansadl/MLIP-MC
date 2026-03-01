@@ -84,8 +84,17 @@ class MLP_Gibbs:
         MD timestep in femtoseconds (default: 0.25)
     md_steps : int, optional
         Number of MD steps per thermalization move (default: 2500)
-    md_friction : float, optional
-        Langevin friction coefficient in 1/fs (default: 0.01)
+    md_damp: float, optional
+        Nose-Hoover dampening coefficient in fs (default: 100)
+    md_debug : bool, optional
+        Write per-step MD trajectory data (energies, temperature) to a
+        CSV file and print an equilibration summary after each MD move.
+        Files are written to ``<output_dir>/md_debug/`` and overwritten
+        each move so only the most recent trajectory is kept.
+        Default: False.
+    md_debug_interval : int, optional
+        Interval (in MD steps) at which to sample debug data during the
+        MD trajectory. Default: 10.
     debug : bool, optional
         Enable debug printing (default: False)
     output_dir : str, optional
@@ -122,6 +131,8 @@ class MLP_Gibbs:
         md_timestep=1.0,
         md_steps=1000,
         md_damp=100,
+        md_debug=False,
+        md_debug_interval=10,
         debug=False,
         output_dir='results',
         n_equilibration_steps=None,
@@ -146,6 +157,8 @@ class MLP_Gibbs:
         self.md_timestep = md_timestep
         self.md_steps = md_steps
         self.md_damp = md_damp
+        self.md_debug = md_debug
+        self.md_debug_interval = max(1, md_debug_interval)
         self.n_equilibration_steps = n_equilibration_steps
         self.n_production_steps = n_production_steps
         self.checkpoint_interval = checkpoint_interval
@@ -420,6 +433,11 @@ class MLP_Gibbs:
         The paper uses Nosé-Hoover thermostat with velocity Verlet
         integration (625 fs trajectory, 0.25 fs timestep = 2500 steps).
 
+        When ``md_debug`` is enabled, attaches an observer that records
+        temperature, potential/kinetic/total energy, and max force at
+        every ``md_debug_interval`` steps. The data is written to CSV
+        files in ``<output_dir>/md_debug/`` and a summary is printed.
+
         Returns
         -------
         bool
@@ -428,6 +446,8 @@ class MLP_Gibbs:
         from ase.md.nose_hoover_chain import NoseHooverChainNVT
         from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
         from ase import units
+
+        md_move_number = self.moves['md_thermalization']['attempted']
 
         for box_id in [1, 2]:
             if box_id == 1:
@@ -449,16 +469,56 @@ class MLP_Gibbs:
             # Initialize velocities from Maxwell-Boltzmann distribution
             MaxwellBoltzmannDistribution(atoms_md, temperature_K=self.T)
 
-            # Create Langevin dynamics (NVT thermostat)
+            # Create Nose-Hoover Chain NVT dynamics
             dyn = NoseHooverChainNVT(
                 atoms_md,
                 timestep=self.md_timestep * units.fs,
                 temperature_K=self.T,
-                tdamp=self.md_damp / units.fs,
+                tdamp=self.md_damp * units.fs,
             )
+
+            # Attach debug observer if enabled
+            debug_data = []
+            if self.md_debug:
+                def _observer(a=atoms_md, d=dyn, data=debug_data):
+                    step = d.nsteps
+                    e_pot = a.get_potential_energy()
+                    e_kin = a.get_kinetic_energy()
+                    n_atoms = len(a)
+                    temp = (2.0 * e_kin) / (3.0 * n_atoms * ase_units.kB) if n_atoms > 0 else 0.0
+                    forces = a.get_forces()
+                    max_force = float(np.max(np.linalg.norm(forces, axis=1)))
+                    data.append({
+                        'step': step,
+                        'time_fs': step * self.md_timestep,
+                        'T_inst': temp,
+                        'E_pot': e_pot,
+                        'E_kin': e_kin,
+                        'E_tot': e_pot + e_kin,
+                        'max_force': max_force,
+                    })
+
+                # Record initial state (step 0)
+                _observer()
+                dyn.attach(_observer, interval=self.md_debug_interval)
 
             # Run MD trajectory
             dyn.run(self.md_steps)
+
+            # Capture final step if not already recorded
+            if self.md_debug and debug_data[-1]['step'] != self.md_steps:
+                debug_data.append({
+                    'step': self.md_steps,
+                    'time_fs': self.md_steps * self.md_timestep,
+                    'T_inst': (2.0 * atoms_md.get_kinetic_energy()) / (3.0 * len(atoms_md) * ase_units.kB) if len(atoms_md) > 0 else 0.0,
+                    'E_pot': atoms_md.get_potential_energy(),
+                    'E_kin': atoms_md.get_kinetic_energy(),
+                    'E_tot': atoms_md.get_potential_energy() + atoms_md.get_kinetic_energy(),
+                    'max_force': float(np.max(np.linalg.norm(atoms_md.get_forces(), axis=1))),
+                })
+
+            if self.md_debug and debug_data:
+                self._write_md_debug(box_id, md_move_number, debug_data)
 
             # Update box state (always accepted)
             # Recompute energy after thermalization
@@ -474,6 +534,63 @@ class MLP_Gibbs:
         self.moves['md_thermalization']['accepted'] += 1
         self._debug_print('Accepted MD thermalization on both boxes')
         return True
+
+    def _write_md_debug(self, box_id, move_number, data):
+        """
+        Write MD debug trajectory to CSV and print equilibration summary.
+
+        Parameters
+        ----------
+        box_id : int
+            Box identifier (1 or 2)
+        move_number : int
+            The MD move count (0-indexed)
+        data : list of dict
+            Per-step records with keys: step, time_fs, T_inst, E_pot,
+            E_kin, E_tot, max_force
+        """
+        md_dir = Path(self.output_dir) / 'md_debug'
+        md_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write CSV (overwritten each move — keeps only most recent)
+        csv_path = md_dir / f'md_box{box_id}.csv'
+        with open(csv_path, 'w') as f:
+            f.write('step,time_fs,T_inst,E_pot,E_kin,E_tot,max_force\n')
+            for row in data:
+                f.write(
+                    f"{row['step']},"
+                    f"{row['time_fs']:.2f},"
+                    f"{row['T_inst']:.2f},"
+                    f"{row['E_pot']:.6f},"
+                    f"{row['E_kin']:.6f},"
+                    f"{row['E_tot']:.6f},"
+                    f"{row['max_force']:.6f}\n"
+                )
+
+        # Compute summary statistics
+        temps = np.array([d['T_inst'] for d in data])
+        e_pots = np.array([d['E_pot'] for d in data])
+        e_tots = np.array([d['E_tot'] for d in data])
+        max_forces = np.array([d['max_force'] for d in data])
+
+        n = len(data)
+        # Use second half for "equilibrated" statistics
+        half = max(1, n // 2)
+        T_mean_2nd = np.mean(temps[half:])
+        T_std_2nd = np.std(temps[half:])
+        E_pot_mean_2nd = np.mean(e_pots[half:])
+        E_pot_std_2nd = np.std(e_pots[half:])
+        E_tot_drift = e_tots[-1] - e_tots[0]
+        E_tot_drift_per_atom = E_tot_drift / max(1, (self.N1 if box_id == 1 else self.N2) * self.n_mol)
+
+        print(f"\n  [MD Debug] Box {box_id}  |  move #{move_number}  |  {data[-1]['step']} steps  ({data[-1]['time_fs']:.0f} fs)")
+        print(f"    T target: {self.T:.1f} K")
+        print(f"    T (2nd half):  mean={T_mean_2nd:.1f} K   std={T_std_2nd:.1f} K")
+        print(f"    E_pot (2nd half): mean={E_pot_mean_2nd:.4f}   std={E_pot_std_2nd:.4f} eV")
+        print(f"    E_tot drift: {E_tot_drift:.4f} eV  ({E_tot_drift_per_atom:.6f} eV/atom)")
+        print(f"    E_pot: {e_pots[0]:.4f} -> {e_pots[-1]:.4f} eV   (delta={e_pots[-1]-e_pots[0]:.4f})")
+        print(f"    Max force: {max_forces[0]:.4f} -> {max_forces[-1]:.4f} eV/A")
+        print(f"    CSV: {csv_path}")
 
     def _move_volume(self):
         """
