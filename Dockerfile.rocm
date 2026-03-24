@@ -7,12 +7,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN pip install --upgrade pip --break-system-packages --ignore-installed
 
 # Set backend via build argument (defaults to mace-torch for backward compatibility)
-ARG MLIP_BACKEND=fairchem-core
+ARG MLIP_BACKEND=fairchem
 ENV MLIP_BACKEND=${MLIP_BACKEND}
 
 # Install PyTorch, TorchVision, and TorchAudio for ROCm 6.4.
 # If MLIP_BACKEND is fairchem-core, pin specific versions; otherwise install latest.
-RUN if [ "$MLIP_BACKEND" = "fairchem-core" ]; then \
+RUN if [ "$MLIP_BACKEND" = "fairchem" ]; then \
         pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4 --break-system-packages; \
     else \
         pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4; \

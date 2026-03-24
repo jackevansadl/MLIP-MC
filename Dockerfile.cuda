@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y \
 # Upgrade pip to the latest version
 RUN pip install --upgrade pip --break-system-packages --ignore-installed
 
-# Set backend via build argument (defaults to fairchem-core)
-ARG MLIP_BACKEND=fairchem-core
+# Set backend via build argument (defaults to fairchem)
+ARG MLIP_BACKEND=fairchem
 ENV MLIP_BACKEND=${MLIP_BACKEND}
 
 
@@ -26,7 +26,7 @@ RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
     --break-system-packages
 
 # Install backend-specific dependencies
-RUN if [ "$MLIP_BACKEND" = "fairchem-core" ]; then \
+RUN if [ "$MLIP_BACKEND" = "fairchem" ]; then \
         # fairchem-core v2: Simplified installation - no torch-geometric needed
         pip install fairchem-core --break-system-packages; \
     elif [ "$MLIP_BACKEND" = "mace-torch" ]; then \
