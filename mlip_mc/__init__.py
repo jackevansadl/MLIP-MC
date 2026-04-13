@@ -5,7 +5,7 @@ A Python package for performing Monte Carlo simulations of gas adsorption
 in porous materials using machine-learned interatomic potentials.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 from .src.gcmc import MLP_GCMC
 from .src.widom import MLP_Widom
