@@ -476,6 +476,7 @@ def run_single_pressure(
         # 1. Set Environment Variables for GPU Isolation
         if isinstance(gpu_id, int):
             os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+            os.environ['HIP_VISIBLE_DEVICES'] = str(gpu_id)
         
         # 2. Import libraries AFTER setting environment variables
         import torch
@@ -1106,6 +1107,7 @@ def run_widom(
             _print_warning(f"GPU {gpu_id} not available, using GPU 0")
             gpu_id = 0
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        os.environ['HIP_VISIBLE_DEVICES'] = str(gpu_id)
         device = 'cuda'
         device_str = f"GPU {gpu_id}"
     else:
