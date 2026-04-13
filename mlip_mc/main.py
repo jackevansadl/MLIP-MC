@@ -9,13 +9,27 @@ import os
 import sys
 import json
 import shutil
+import logging
 import traceback
+import warnings
 from pathlib import Path
 from typing import Union, List, Tuple, Dict, Any, Optional
 import numpy as np
 import multiprocessing as mp
 from multiprocessing import Process, Queue
 import argparse
+
+# Suppress noisy third-party warnings. These filters are set at module level so
+# they are re-applied automatically in every spawned worker process (which
+# re-imports this module before running its target function).
+warnings.filterwarnings(
+    "ignore",
+    message=r"crystal system .* is not interpreted for space group",
+    category=UserWarning,
+)
+logging.getLogger(
+    "torch.distributed.elastic.multiprocessing.redirects"
+).setLevel(logging.ERROR)
 
 # Package imports - no need to modify path
 
@@ -524,9 +538,9 @@ def run_single_pressure(
         print(f"  [{device_str}] Running {n_total_steps} steps...")
         gcmc.run(N=n_total_steps)
         
-        log_file_bin = os.path.join(output_dir, f"log_{P/bar:.2f}bar.bin")
-        results_file_npz = os.path.join(output_dir, f"results_{P/bar:.2f}bar.npz")
-        results_file_json = os.path.join(output_dir, f"results_{P/bar:.2f}bar.json")
+        log_file_bin = os.path.join(output_dir, f"log_{P/bar:.4f}bar.bin")
+        results_file_npz = os.path.join(output_dir, f"results_{P/bar:.4f}bar.npz")
+        results_file_json = os.path.join(output_dir, f"results_{P/bar:.4f}bar.json")
         
         uptake_data = []
         energy_data = []
