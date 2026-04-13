@@ -189,27 +189,27 @@ def _print_section_header(title, width=70):
 
 def _print_subsection(title, width=70):
     """Print a formatted subsection header."""
-    print()
-    print("─" * width)
-    print(f"  {title}")
-    print("─" * width)
+    print(flush=True)
+    print("─" * width, flush=True)
+    print(f"  {title}", flush=True)
+    print("─" * width, flush=True)
 
 
 def _print_info(label, value, indent=2):
     """Print a formatted info line."""
-    print(f"{' ' * indent}{label:<25} {value}")
+    print(f"{' ' * indent}{label:<25} {value}", flush=True)
 
 
 def _print_warning(message):
     """Print a formatted warning message."""
-    print(f"\n{'!' * 70}")
-    print(f"  WARNING: {message}")
-    print(f"{'!' * 70}\n")
+    print(f"\n{'!' * 70}", flush=True)
+    print(f"  WARNING: {message}", flush=True)
+    print(f"{'!' * 70}\n", flush=True)
 
 
 def _print_success(message):
     """Print a formatted success message."""
-    print(f"  [OK] {message}")
+    print(f"  [OK] {message}", flush=True)
 
 
 def _print_table(headers, rows, width=70):
@@ -227,16 +227,16 @@ def _print_table(headers, rows, width=70):
     
     # Print header
     header_line = "│ " + " │ ".join(str(h).ljust(col_widths[i] - 2) for i, h in enumerate(headers)) + " │"
-    print("┌" + "─" * (total_width - 2) + "┐")
-    print(header_line)
-    print("├" + "─" * (total_width - 2) + "┤")
+    print("┌" + "─" * (total_width - 2) + "┐", flush=True)
+    print(header_line, flush=True)
+    print("├" + "─" * (total_width - 2) + "┤", flush=True)
     
     # Print rows
     for row in rows:
         row_line = "│ " + " │ ".join(str(val).ljust(col_widths[i] - 2) for i, val in enumerate(row)) + " │"
-        print(row_line)
+        print(row_line, flush=True)
     
-    print("└" + "─" * (total_width - 2) + "┘")
+    print("└" + "─" * (total_width - 2) + "┘", flush=True)
 
 
 def _resolve_model_spec(model_spec: str) -> Tuple[str, Optional[str], Optional[str], bool]:
@@ -499,7 +499,7 @@ def run_single_pressure(
         model = _load_model(model_path, device=device, backend=backend)
         
         P = P_bar * bar
-        print(f"  [{device_str}] Starting simulation at P = {P_bar:.2f} bar")
+        print(f"  [{device_str}] Starting simulation at P = {P_bar:g} bar", flush=True)
         
         # Calculate Fugacity using Peng-Robinson EOS
         if adsorbate_name:
@@ -561,7 +561,7 @@ def run_single_pressure(
                 avg_energy = np.mean([e for e in energy_data if e != 0]) if any(e != 0 for e in energy_data) else 0.0
                 
                 device_str = _format_device_str(gpu_id)
-                print(f"  [{device_str}] Completed P = {P_bar:.2f} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}")
+                print(f"  [{device_str}] Completed P = {P_bar:g} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}", flush=True)
                 
                 # Return results via queue
                 result_queue.put({
@@ -572,7 +572,7 @@ def run_single_pressure(
                 })
             else:
                  device_str = _format_device_str(gpu_id)
-                 print(f"  [{device_str}] Warning: No valid data found in log for P = {P_bar:.2f} bar")
+                 print(f"  [{device_str}] Warning: No valid data found in log for P = {P_bar:g} bar", flush=True)
                  result_queue.put({
                     'pressure': P_bar,
                     'uptake': None,
@@ -591,7 +591,7 @@ def run_single_pressure(
             avg_energy = np.mean([e for e in energy_data if e != 0]) if any(e != 0 for e in energy_data) else 0.0
             
             device_str = _format_device_str(gpu_id)
-            print(f"  [{device_str}] Completed P = {P_bar:.2f} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}")
+            print(f"  [{device_str}] Completed P = {P_bar:g} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}", flush=True)
             
             # Return results via queue
             result_queue.put({
@@ -612,7 +612,7 @@ def run_single_pressure(
             avg_energy = np.mean([e for e in energy_data if e != 0]) if any(e != 0 for e in energy_data) else 0.0
             
             device_str = _format_device_str(gpu_id)
-            print(f"  [{device_str}] Completed P = {P_bar:.2f} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}")
+            print(f"  [{device_str}] Completed P = {P_bar:g} bar: Uptake = {avg_uptake:.3f} ± {std_uptake:.3f}", flush=True)
             
             # Return results via queue
             result_queue.put({
@@ -623,7 +623,7 @@ def run_single_pressure(
             })
         else:
             device_str = _format_device_str(gpu_id)
-            print(f"  [{device_str}] Warning: Results file not found for P = {P_bar:.2f} bar")
+            print(f"  [{device_str}] Warning: Results file not found for P = {P_bar:g} bar", flush=True)
             result_queue.put({
                 'pressure': P_bar,
                 'uptake': None,
@@ -632,7 +632,7 @@ def run_single_pressure(
             })
     except Exception as e:
         device_str = _format_device_str(gpu_id)
-        print(f"  [{device_str}] ERROR in simulation at P = {P_bar:.2f} bar: {e}", file=sys.stderr)
+        print(f"  [{device_str}] ERROR in simulation at P = {P_bar:g} bar: {e}", file=sys.stderr, flush=True)
         traceback.print_exc()
         result_queue.put({
             'pressure': P_bar,
@@ -875,7 +875,7 @@ def run_gcmc(
         processes.append(p)
         
         device_str = _format_device_str(gpu_id) if isinstance(gpu_id, int) else str(gpu_id).upper()
-        _print_info("Started", f"P = {P_bar:.2f} bar on {device_str}")
+        _print_info("Started", f"P = {P_bar:g} bar on {device_str}")
     
     print(f"\n  Waiting for {len(processes)} simulation(s) to complete...")
     for p in processes:
@@ -901,7 +901,7 @@ def run_gcmc(
             uptake_stds.append(r['uptake_std'])
             adsorption_energies.append(r['energy'])
         else:
-            _print_warning(f"No data for P = {r['pressure']:.2f} bar")
+            _print_warning(f"No data for P = {r['pressure']:g} bar")
             if 'error' in r:
                 print(f"    Error: {r['error']}", file=sys.stderr)
     
@@ -929,7 +929,7 @@ def run_gcmc(
     if len(pressures) > 0:
         _print_section_header("Isotherm Summary")
         headers = ["Pressure (bar)", "Uptake (mol/uc)", "Std Dev", "Energy (eV)"]
-        rows = [[f"{p:.2f}", f"{u:.3f}", f"{std:.3f}", f"{e:.4f}"] 
+        rows = [[f"{p:g}", f"{u:.3f}", f"{std:.3f}", f"{e:.4f}"] 
                 for p, u, std, e in zip(pressures, uptakes, uptake_stds, adsorption_energies)]
         _print_table(headers, rows)
     
