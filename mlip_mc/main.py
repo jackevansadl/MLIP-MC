@@ -408,6 +408,33 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None, orb
         calc = ORBCalculator(orbff, device=device)
         return calc
 
+    elif backend == 'lammps-classical':
+        import json
+        from .src.lammps_backend import build_lammps_calculator
+
+        config_path = Path(model_path)
+        with open(config_path, "r") as fh:
+            config = json.load(fh)
+
+        lmp_input_path = Path(config["lammps_input"])
+        if not lmp_input_path.is_absolute():
+            lmp_input_path = config_path.parent / lmp_input_path
+
+        atom_types = {str(k): int(v) for k, v in config["atom_types"].items()}
+        charges = config.get("charges")
+
+        calc = build_lammps_calculator(
+            lmpcmds=lmp_input_path,
+            atom_types=atom_types,
+            log_file=config.get("log_file"),
+            keep_alive=bool(config.get("keep_alive", True)),
+            lammps_header=config.get("lammps_header"),
+            lammps_name=config.get("lammps_name"),
+        )
+        if charges is not None:
+            calc._mlipmc_charges = {str(k): float(v) for k, v in charges.items()}
+        return calc
+
     else:
         raise ValueError(f"Unknown backend: {backend}")
 

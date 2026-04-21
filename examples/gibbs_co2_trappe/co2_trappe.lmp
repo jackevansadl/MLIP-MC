@@ -1,0 +1,49 @@
+# TraPPE rigid CO2 (Harris & Yung, 1995 / RASPA3 reference).
+# Type 1 = C_co2, Type 2 = O_co2.
+# Energies in LAMMPS 'real' units (kcal/mol); lengths in Angstrom.
+# eps_K converted to kcal/mol via k_B: 1 K = 0.0019872041 kcal/mol.
+#
+#   C_co2: eps = 29.933 K = 0.059490 kcal/mol,  sigma = 2.745 A,  q = +0.6512
+#   O_co2: eps = 85.671 K = 0.170245 kcal/mol,  sigma = 3.017 A,  q = -0.3256
+#
+# Cross terms via Lorentz-Berthelot (arithmetic sigma, geometric epsilon).
+# LAMMPS uses arithmetic for both in pair_modify mix arithmetic; this matches
+# "Lorentz-Berthelot" for sigma and is what RASPA3's default mixing does here.
+# 12.0 A real-space LJ/Coulomb cutoff, shifted, no tail correction, PPPM Ewald.
+#
+# ---------------------------------------------------------------------------
+# Note on intramolecular interactions
+# ---------------------------------------------------------------------------
+# ASE's bundled LAMMPSlib wrapper does not declare bonds or molecule IDs on
+# the atoms it pushes to LAMMPS, so the pair style computes 1-2 / 1-3 LJ and
+# Coulomb *inside* each rigid CO2. For the TraPPE geometry (r_CO = 1.149 A)
+# this is a large positive offset (~49400 kcal/mol per CO2, dominated by LJ
+# at r << sigma).
+#
+# This is harmless for the MC driver because every molecule is treated as a
+# rigid body:
+#   * Translation / rotation moves leave the molecule's internal geometry
+#     unchanged, so the intramolecular term is identical before and after
+#     the move and cancels exactly in dE.
+#   * Gibbs swap moves and GCMC insertion/deletion shift a molecule between
+#     boxes (or between the reservoir and a box). The same constant
+#     E_intra appears on each side of the energy balance and cancels in
+#     the acceptance criterion (or against the reservoir chemical
+#     potential, for GCMC, provided the same force field is used for the
+#     gas-phase reference).
+#
+# If you need absolute (inter-molecular-only) energies for reporting,
+# subtract N_molecules * E_intra_single from the total, where E_intra_single
+# is measured by placing a single rigid CO2 alone in the same box / kspace
+# setup and calling get_potential_energy(). See the README for a worked
+# example.
+
+pair_style       lj/cut/coul/long 12.0
+pair_modify      mix arithmetic shift yes tail no
+kspace_style     pppm 1.0e-5
+
+pair_coeff       1 1 0.059490 2.745
+pair_coeff       2 2 0.170245 3.017
+
+set type 1 charge  0.6512
+set type 2 charge -0.3256

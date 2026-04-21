@@ -1,0 +1,6 @@
+{
+  "lammps_input": "co2_trappe.lmp",
+  "atom_types": {"C": 1, "O": 2},
+  "charges": {"C": 0.6512, "O": -0.3256},
+  "keep_alive": true
+}

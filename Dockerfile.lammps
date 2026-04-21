@@ -1,0 +1,59 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    python3-venv \
+    build-essential \
+    cmake \
+    git \
+    libjpeg-dev \
+    libfftw3-dev \
+    libopenmpi-dev \
+    openmpi-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+# Drop the PEP 668 "externally-managed" marker so subsequent `pip install`
+# calls (including those run internally by LAMMPS' install-python target)
+# don't need --break-system-packages. Safe inside a single-purpose container.
+RUN rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
+
+RUN pip install --upgrade pip --ignore-installed
+
+# LAMMPS from source with Python bindings + KSPACE (pppm/ewald for coul/long),
+# MOLECULE, EXTRA-PAIR. No PyPI wheel attempt: the stable PyPI `lammps` package
+# lacks a linux/arm64 wheel and its sdist expects the built shared library to
+# already exist alongside, so a fresh source build is the robust path on both
+# arm64 and amd64.
+#
+# We install into /usr/local (shared lib -> /usr/local/lib) and use LAMMPS'
+# `install-python` CMake target to drop the python bindings into site-packages
+# in-place — this avoids the pip build-isolation issue where setup.py loses
+# its `../src/version.h` neighbour.
+RUN git clone --depth 1 https://github.com/lammps/lammps.git /tmp/lammps && \
+    cmake -S /tmp/lammps/cmake -B /tmp/lammps/build \
+          -D CMAKE_INSTALL_PREFIX=/usr/local \
+          -D PKG_KSPACE=yes \
+          -D PKG_MOLECULE=yes \
+          -D PKG_EXTRA-PAIR=yes \
+          -D PKG_PYTHON=yes \
+          -D BUILD_SHARED_LIBS=yes \
+          -D LAMMPS_EXCEPTIONS=yes && \
+    cmake --build /tmp/lammps/build -j"$(nproc)" && \
+    cmake --install /tmp/lammps/build && \
+    cmake --build /tmp/lammps/build --target install-python && \
+    ldconfig && \
+    python3 -c "from lammps import lammps; lmp=lammps(); lmp.command('kspace_style pppm 1.0e-5'); lmp.close(); print('LAMMPS Python bindings OK')"
+
+# ASE provides the LAMMPSlib wrapper used by mlip_mc.src.lammps_backend.
+RUN pip install ase
+WORKDIR /app
+
+COPY . /app
+
+# Install the project without any MLIP backend extras. The lammps-classical
+# backend is independent of fairchem / mace-torch / orb-models.
+RUN pip install "."
+CMD ["/bin/bash"]
