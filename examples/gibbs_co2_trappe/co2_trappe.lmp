@@ -6,44 +6,36 @@
 #   C_co2: eps = 29.933 K = 0.059490 kcal/mol,  sigma = 2.745 A,  q = +0.6512
 #   O_co2: eps = 85.671 K = 0.170245 kcal/mol,  sigma = 3.017 A,  q = -0.3256
 #
-# Cross terms via Lorentz-Berthelot (arithmetic sigma, geometric epsilon).
-# LAMMPS uses arithmetic for both in pair_modify mix arithmetic; this matches
-# "Lorentz-Berthelot" for sigma and is what RASPA3's default mixing does here.
-# 12.0 A real-space LJ/Coulomb cutoff, shifted, no tail correction, PPPM Ewald.
+# Cross terms via Lorentz-Berthelot. LAMMPS uses arithmetic mixing with
+# shifted LJ; tail correction off; PPPM Ewald for long-range Coulomb.
 #
-# ---------------------------------------------------------------------------
-# Note on intramolecular interactions
-# ---------------------------------------------------------------------------
-# ASE's bundled LAMMPSlib wrapper does not declare bonds or molecule IDs on
-# the atoms it pushes to LAMMPS, so the pair style computes 1-2 / 1-3 LJ and
-# Coulomb *inside* each rigid CO2. For the TraPPE geometry (r_CO = 1.149 A)
-# this is a large positive offset (~49400 kcal/mol per CO2, dominated by LJ
-# at r << sigma).
-#
-# This is harmless for the MC driver because every molecule is treated as a
-# rigid body:
-#   * Translation / rotation moves leave the molecule's internal geometry
-#     unchanged, so the intramolecular term is identical before and after
-#     the move and cancels exactly in dE.
-#   * Gibbs swap moves and GCMC insertion/deletion shift a molecule between
-#     boxes (or between the reservoir and a box). The same constant
-#     E_intra appears on each side of the energy balance and cancels in
-#     the acceptance criterion (or against the reservoir chemical
-#     potential, for GCMC, provided the same force field is used for the
-#     gas-phase reference).
-#
-# If you need absolute (inter-molecular-only) energies for reporting,
-# subtract N_molecules * E_intra_single from the total, where E_intra_single
-# is measured by placing a single rigid CO2 alone in the same box / kspace
-# setup and calling get_potential_energy(). See the README for a worked
-# example.
+# Bond topology + intramolecular exclusions are handled by the wrapper:
+#   * create_box_extra in the JSON adds bond/types and per-atom storage so
+#     bonds can be declared.
+#   * intra_bonds in the JSON tells the wrapper to issue the right
+#     create_bonds single/bond commands after every (re)build, so insertion
+#     and deletion moves keep the topology consistent.
+#   * special_bonds (declared here) zeros out 1-2 (bonded C-O) and 1-3
+#     (next-nearest O-O via the central C) LJ + Coulomb pair terms so the
+#     huge intra repulsion at r << sigma drops out of the total energy.
 
+# Masses (LAMMPSlib re-issues these later with the same values; no harm).
+mass             1 12.011
+mass             2 15.999
+
+# Bond style + zero coefficient — the bond exists only as a topology marker,
+# carrying no force.
+bond_style       zero
+bond_coeff       1 0.0
+
+# Exclude 1-2 and 1-3 LJ + Coulomb (for any molecule with bonds declared).
+special_bonds    lj 0.0 0.0 0.0 coul 0.0 0.0 0.0
+
+# Pair style + Ewald + coefficients.
 pair_style       lj/cut/coul/long 12.0
 pair_modify      mix arithmetic shift yes tail no
-kspace_style     pppm 1.0e-5
-
 pair_coeff       1 1 0.059490 2.745
 pair_coeff       2 2 0.170245 3.017
-
 set type 1 charge  0.6512
 set type 2 charge -0.3256
+kspace_style     pppm 1.0e-5

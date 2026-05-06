@@ -2,5 +2,11 @@
   "lammps_input": "co2_trappe.lmp",
   "atom_types": {"C": 1, "O": 2},
   "charges": {"C": 0.6512, "O": -0.3256},
+  "create_box_extra": "bond/types 1 extra/bond/per/atom 2 extra/special/per/atom 4",
+  "intra_bonds": {
+    "atoms_per_molecule": 3,
+    "bond_pairs": [[0, 1], [1, 2]],
+    "bond_type": 1
+  },
   "keep_alive": true
 }
