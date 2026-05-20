@@ -227,6 +227,10 @@ class MLP_Gibbs:
         self.volume_rejected_negative = 0
         self.volume_rejected_overlap = 0
         self.swap_rosenbluth_zero = 0  # CBMC pathology counter
+        # Per-trial VDW skips inside CBMC (only when swap_vdw_screen=True).
+        # Counts individual trial states (not whole swaps) where the screen
+        # pre-rejected the trial, avoiding an MLIP / LAMMPS energy call.
+        self.swap_cbmc_trials_screened = 0
 
         # ---- sampling-overhaul knobs (RASPA-aligned) ----
         if swap_variant not in ('plain', 'cbmc'):
@@ -936,6 +940,11 @@ class MLP_Gibbs:
         E_source_minus = self._compute_energy(atoms_source_minus)
 
         # --- Forward (target side): k trial insertions, Rosenbluth weight. ---
+        # When swap_vdw_screen is True, trials that overlap by VDW radii are
+        # assigned u = HIGH_ENERGY *without* an MLIP / LAMMPS energy call --
+        # mathematically identical to letting the calculator return a hard-core
+        # repulsion, but skipping the expensive call. Must be applied the same
+        # way to the reverse (source) trials so detailed balance holds.
         template = self.atoms_mol.get_positions()
         trial_states_target = generate_trial_states(template, target_cell, k)
         u_new = np.empty(k, dtype=float)
@@ -946,7 +955,13 @@ class MLP_Gibbs:
             cand.set_cell(target_cell, scale_atoms=False)
             cand.set_pbc(True)
             atoms_target_with_trial[j] = cand
-            u_new[j] = self._compute_energy(cand) - E_target
+            if self.swap_vdw_screen and vdw_overlap(
+                cand, self.vdw, 0, self.n_mol, N_target
+            ):
+                u_new[j] = HIGH_ENERGY
+                self.swap_cbmc_trials_screened += 1
+            else:
+                u_new[j] = self._compute_energy(cand) - E_target
 
         # log-sum-exp for stability.
         bu = beta * u_new
@@ -977,6 +992,10 @@ class MLP_Gibbs:
                 template, source_cell, k - 1
             )
             u_alt = np.empty(k - 1, dtype=float)
+            # The alt molecule's molecule-index in atoms_source_minus + alt is
+            # whatever its count gives -- since source-minus has (N_source-1)
+            # molecules, the appended alt is at molecule index (N_source - 1).
+            alt_mol_idx = N_source - 1
             for ell in range(k - 1):
                 mol_ell = Atoms(
                     numbers=mol_numbers,
@@ -985,7 +1004,13 @@ class MLP_Gibbs:
                 cand = atoms_source_minus + mol_ell
                 cand.set_cell(source_cell, scale_atoms=False)
                 cand.set_pbc(True)
-                u_alt[ell] = self._compute_energy(cand) - E_source_minus
+                if self.swap_vdw_screen and vdw_overlap(
+                    cand, self.vdw, 0, self.n_mol, alt_mol_idx
+                ):
+                    u_alt[ell] = HIGH_ENERGY
+                    self.swap_cbmc_trials_screened += 1
+                else:
+                    u_alt[ell] = self._compute_energy(cand) - E_source_minus
             u_old_arr = np.concatenate(([u_real], u_alt))
         else:
             u_old_arr = np.array([u_real])
@@ -1164,6 +1189,7 @@ class MLP_Gibbs:
                 'volume_negative': self.volume_rejected_negative,
                 'volume_overlap': self.volume_rejected_overlap,
                 'swap_rosenbluth_zero': self.swap_rosenbluth_zero,
+                'swap_cbmc_trials_screened': self.swap_cbmc_trials_screened,
             },
             'sampling': {
                 'swap_variant': self.swap_variant,
@@ -1215,6 +1241,9 @@ class MLP_Gibbs:
             self.volume_rejected_negative = rejections.get('volume_negative', 0)
             self.volume_rejected_overlap = rejections.get('volume_overlap', 0)
             self.swap_rosenbluth_zero = rejections.get('swap_rosenbluth_zero', 0)
+            self.swap_cbmc_trials_screened = rejections.get(
+                'swap_cbmc_trials_screened', 0
+            )
 
             # Sampling-config check: switching swap_variant mid-run is unsafe
             # because the move statistics aren't directly comparable.
