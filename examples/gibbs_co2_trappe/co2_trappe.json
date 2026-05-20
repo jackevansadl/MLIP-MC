@@ -8,5 +8,6 @@
     "bond_pairs": [[0, 1], [1, 2]],
     "bond_type": 1
   },
+  "lammps_threads": 4,
   "keep_alive": true
 }

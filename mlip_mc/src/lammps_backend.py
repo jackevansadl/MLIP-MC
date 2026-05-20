@@ -169,6 +169,8 @@ def build_lammps_calculator(
     lammps_name: Optional[str] = None,
     create_box_extra: Optional[str] = None,
     intra_bonds: Optional[dict] = None,
+    lammps_threads: Optional[int] = None,
+    extra_cmd_args: Optional[List[str]] = None,
 ):
     """Return a configured ``LAMMPSlib`` ASE calculator.
 
@@ -216,6 +218,16 @@ def build_lammps_calculator(
         shrink the system keep the intra-molecular topology consistent.
         Pair with ``special_bonds`` in the user lmpcmds to exclude 1-2 /
         1-3 / 1-4 LJ + Coulomb terms.
+    lammps_threads
+        Number of OpenMP threads for LAMMPS. When set (>= 1), the LAMMPS
+        process is launched with ``-sf omp -pk omp <N>`` so all pair /
+        bond / kspace styles use their ``/omp`` variants. The image must
+        have been built with ``-D PKG_OPENMP=yes`` (see Dockerfile.lammps).
+        Also set the host environment variable ``OMP_NUM_THREADS`` (and
+        give the container enough cores via ``--cpus``) for full effect.
+    extra_cmd_args
+        Additional LAMMPS command-line arguments to append after the
+        threading flags. Useful for ``--screen``/``-pk gpu N`` etc.
     """
     from ase.calculators.lammpslib import LAMMPSlib
 
@@ -241,6 +253,15 @@ def build_lammps_calculator(
         kwargs["log_file"] = log_file
     if lammps_name is not None:
         kwargs["lammps_name"] = lammps_name
+
+    cmd_args: List[str] = []
+    if lammps_threads is not None and int(lammps_threads) >= 1:
+        n_thr = int(lammps_threads)
+        cmd_args.extend(["-sf", "omp", "-pk", "omp", str(n_thr)])
+    if extra_cmd_args:
+        cmd_args.extend(list(extra_cmd_args))
+    if cmd_args:
+        kwargs["extra_cmd_args"] = tuple(cmd_args)
 
     if create_box_extra or intra_bonds:
         cls = _make_bonded_lammpslib_class()

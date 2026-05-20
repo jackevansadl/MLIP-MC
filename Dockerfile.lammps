@@ -38,6 +38,7 @@ RUN git clone --depth 1 https://github.com/lammps/lammps.git /tmp/lammps && \
           -D PKG_KSPACE=yes \
           -D PKG_MOLECULE=yes \
           -D PKG_EXTRA-PAIR=yes \
+          -D PKG_OPENMP=yes \
           -D PKG_PYTHON=yes \
           -D BUILD_SHARED_LIBS=yes \
           -D LAMMPS_EXCEPTIONS=yes && \

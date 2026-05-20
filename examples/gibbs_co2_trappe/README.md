@@ -13,10 +13,36 @@ with PPPM Ewald, 12 A real-space cutoff.
 
 ## Requirements
 
-- `lammps` Python module (bindings) with `KSPACE` package enabled.
+- `lammps` Python module (bindings) with `KSPACE` and `OPENMP` packages enabled.
 - `ase` (for `LAMMPSlib`).
 
 See `Dockerfile.lammps` at the repo root for a working build.
+
+## Threading (OpenMP)
+
+The image is built with `PKG_OPENMP`, so LAMMPS energy evaluations can use
+multiple cores per process. Two settings need to agree:
+
+1. **`lammps_threads` in `co2_trappe.json`** — passes
+   `-sf omp -pk omp <N>` to LAMMPS so all pair / bond / kspace styles use
+   their `/omp` variants. The committed example uses `4`.
+2. **Container OpenMP env + cores** — set `OMP_NUM_THREADS` and give the
+   container access to that many cores:
+
+   ```bash
+   docker run --rm \
+     --cpus=4 \
+     -e OMP_NUM_THREADS=4 \
+     -v "$PWD":/app \
+     mlip-mc-lammps:arm64 \
+     python3 -W ignore gibbs_lammps_test.py
+   ```
+
+For ~512-atom systems expect ~1.5–2× end-to-end speedup at 4 threads;
+beyond that the small-system overhead and PPPM kspace serialization
+dominate. For higher throughput across many independent runs,
+replica parallelism (multiple containers, each with `--cpus=1`) usually
+beats threading a single run.
 
 ## Bonded force-field setup (how it works)
 
@@ -85,11 +111,11 @@ sim = MLP_Gibbs(
     L1_init=30.0, L2_init=30.0,
     device="cpu",
     vdw_radii=vdw_radii,
-    n_equilibration_steps=500,
-    n_production_steps=1000,
+    n_equilibration_steps=10000,
+    n_production_steps=10000,
     output_dir="results_gibbs_co2_trappe",
 )
-sim.run(1500)
+sim.run(20000)
 ```
 
 Bump `n_equilibration_steps` / `n_production_steps` to match the RASPA3

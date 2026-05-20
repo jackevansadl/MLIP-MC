@@ -432,6 +432,8 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None, orb
             lammps_name=config.get("lammps_name"),
             create_box_extra=config.get("create_box_extra"),
             intra_bonds=config.get("intra_bonds"),
+            lammps_threads=config.get("lammps_threads"),
+            extra_cmd_args=config.get("extra_cmd_args"),
         )
         if charges is not None:
             calc._mlipmc_charges = {str(k): float(v) for k, v in charges.items()}

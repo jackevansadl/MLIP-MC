@@ -10,7 +10,12 @@ import numpy as np
 from ase import Atoms
 from ase.io import read, write
 from ase import units as ase_units
-from .utilities import _random_rotation, random_position, vdw_overlap
+from .utilities import (
+    _random_rotation,
+    generate_trial_states,
+    random_position,
+    vdw_overlap,
+)
 
 
 # Constants
@@ -141,6 +146,13 @@ class MLP_Gibbs:
         write_trajectory=False,
         trajectory_interval=10,
         overwrite_checkpoints=False,
+        # ---- sampling-overhaul knobs (RASPA-aligned) ----
+        swap_vdw_screen=False,
+        swap_variant='cbmc',
+        n_cbmc_trials=8,
+        adapt_steps=True,
+        step_adapt_interval=1000,
+        target_acceptance=None,
     ):
         self.model = model
         self.atoms_mol = atoms_mol
@@ -214,6 +226,39 @@ class MLP_Gibbs:
         self.swap_rejected_empty_source = 0
         self.volume_rejected_negative = 0
         self.volume_rejected_overlap = 0
+        self.swap_rosenbluth_zero = 0  # CBMC pathology counter
+
+        # ---- sampling-overhaul knobs (RASPA-aligned) ----
+        if swap_variant not in ('plain', 'cbmc'):
+            raise ValueError(f"swap_variant must be 'plain' or 'cbmc', got {swap_variant!r}")
+        self.swap_vdw_screen = bool(swap_vdw_screen)
+        self.swap_variant = swap_variant
+        self.n_cbmc_trials = max(1, int(n_cbmc_trials))
+        self.adapt_steps = bool(adapt_steps)
+        self.step_adapt_interval = max(1, int(step_adapt_interval))
+
+        # Target acceptance per move (RASPA defaults: 50% trans/rot/swap, 30% volume).
+        default_target = {
+            'translation': 0.5,
+            'rotation': 0.5,
+            'volume': 0.3,
+        }
+        if target_acceptance:
+            default_target.update(target_acceptance)
+        self.target_acceptance = default_target
+
+        # Step-size bounds for adaptation (see plan §1.2).
+        self._step_bounds = {
+            'translation': (0.05, 5.0),
+            'rotation': (0.01, 0.5),
+            'volume': (1.0, 500.0),
+        }
+        # Snapshot of move counters at last adaptation, so we adapt on
+        # observed acceptance *over the adaptation window*, not lifetime.
+        self._step_adapt_snapshot = {
+            k: {'attempted': 0, 'accepted': 0}
+            for k in ('translation', 'rotation', 'volume')
+        }
 
         # Binary log file path
         self.log_file_path = Path(self.output_dir) / f"log_gibbs_{self.T:.1f}K.bin"
@@ -310,6 +355,60 @@ class MLP_Gibbs:
         """Print debug message if debug mode is enabled."""
         if self.debug:
             print(message)
+
+    def _adapt_step_sizes(self):
+        """Retarget translation / rotation / volume step sizes toward their
+        configured acceptance rates.
+
+        Modeled on RASPA3's MoveStatistics::optimizeAcceptance. Acceptance
+        is measured *over the window since the last call*, not lifetime, so
+        adaptation reacts to current behaviour. We clamp the multiplicative
+        factor and the absolute step size to keep adaptation stable.
+
+        Detailed balance: this method should only be called during the
+        equilibration phase. ``run()`` enforces that.
+        """
+        report_lines = []
+        for move_name in ('translation', 'rotation', 'volume'):
+            prev = self._step_adapt_snapshot[move_name]
+            now = self.moves[move_name]
+            attempted = now['attempted'] - prev['attempted']
+            accepted = now['accepted'] - prev['accepted']
+            # Snapshot for the next window regardless of whether we adapt.
+            self._step_adapt_snapshot[move_name] = {
+                'attempted': now['attempted'],
+                'accepted': now['accepted'],
+            }
+            if attempted < 1:
+                continue
+            observed = accepted / attempted
+            target = self.target_acceptance.get(move_name, 0.5)
+            # Avoid division blowup when no moves accepted in the window:
+            # treat as factor of 0.5 (shrink) instead of 0.
+            if observed <= 1e-6:
+                factor = 0.5
+            else:
+                factor = observed / target
+            factor = max(0.5, min(2.0, factor))
+
+            attr_map = {
+                'translation': 'translation_step',
+                'rotation': 'rotation_circlefrac',
+                'volume': 'max_delta_V',
+            }
+            attr = attr_map[move_name]
+            old = getattr(self, attr)
+            lo, hi = self._step_bounds[move_name]
+            new = max(lo, min(hi, old * factor))
+            setattr(self, attr, new)
+            report_lines.append(
+                f"  {move_name:11s} acc {observed*100:5.1f}% -> "
+                f"step {old:.4g} -> {new:.4g}"
+            )
+        if report_lines and self.debug:
+            print("[adapt_step_sizes]")
+            for line in report_lines:
+                print(line)
 
     def _move_translation(self):
         """
@@ -729,8 +828,13 @@ class MLP_Gibbs:
         atoms_target_trial.set_cell(target_cell, scale_atoms=False)
         atoms_target_trial.set_pbc(True)
 
-        # VDW overlap check in target (new molecule is at index N_target)
-        if vdw_overlap(atoms_target_trial, self.vdw, 0, self.n_mol, N_target):
+        # VDW overlap check in target (new molecule is at index N_target).
+        # Gated by self.swap_vdw_screen: default False (matches RASPA3, which
+        # lets the Metropolis criterion reject overlapping insertions). Setting
+        # to True restores the framework-adsorption-style hard pre-screen.
+        if self.swap_vdw_screen and vdw_overlap(
+            atoms_target_trial, self.vdw, 0, self.n_mol, N_target
+        ):
             self.swap_rejected_vdw += 1
             return False
 
@@ -774,6 +878,172 @@ class MLP_Gibbs:
             return True
 
         return False
+
+    def _move_swap_cbmc(self):
+        """CBMC (Configurational-Bias Monte Carlo) Gibbs swap.
+
+        Port of RASPA3's ``gibbs_swap_cbmc.cpp`` for the rigid-molecule case:
+        propose k trial (position, orientation) states for the inserted
+        molecule, weight each by its Boltzmann factor, pick one stochastically
+        on that weight, and accept by the Rosenbluth-weight ratio.
+
+        Acceptance (Frenkel-Smit Ch. 13; matches the RASPA3 formula):
+
+            P = min(1, (N_src V_tgt / ((N_tgt + 1) V_src)) * (W_new / W_old))
+
+        where W_new = Σ exp(-β u_j) over k trial insertions in the target
+        and W_old = exp(-β u_real) + Σ exp(-β u_alt) over (k-1) alternative
+        placements of the removed molecule in the source.
+
+        Returns
+        -------
+        bool
+            True if accepted.
+        """
+        # Pick source / target (50/50).
+        if np.random.rand() < 0.5:
+            source_id, target_id = 1, 2
+            N_source, N_target = self.N1, self.N2
+            atoms_source, atoms_target = self.atoms_box1, self.atoms_box2
+            E_source, E_target = self.E1, self.E2
+            V_source, V_target = self.V1, self.V2
+        else:
+            source_id, target_id = 2, 1
+            N_source, N_target = self.N2, self.N1
+            atoms_source, atoms_target = self.atoms_box2, self.atoms_box1
+            E_source, E_target = self.E2, self.E1
+            V_source, V_target = self.V2, self.V1
+
+        if N_source == 0:
+            self.swap_rejected_empty_source += 1
+            return False
+
+        k = self.n_cbmc_trials
+        beta = self.beta
+        target_cell = atoms_target.get_cell()
+        source_cell = atoms_source.get_cell()
+
+        # --- Pick a random molecule in source; record its real positions. ---
+        i_mol = np.random.randint(N_source)
+        start = self.n_mol * i_mol
+        end = self.n_mol * (i_mol + 1)
+        mol_numbers = atoms_source.get_atomic_numbers()[start:end].copy()
+        real_positions = atoms_source.get_positions()[start:end].copy()
+
+        # Source-minus: the source box with this molecule removed.
+        atoms_source_minus = atoms_source.copy()
+        del atoms_source_minus[start:end]
+        E_source_minus = self._compute_energy(atoms_source_minus)
+
+        # --- Forward (target side): k trial insertions, Rosenbluth weight. ---
+        template = self.atoms_mol.get_positions()
+        trial_states_target = generate_trial_states(template, target_cell, k)
+        u_new = np.empty(k, dtype=float)
+        atoms_target_with_trial = [None] * k
+        for j in range(k):
+            mol_j = Atoms(numbers=mol_numbers, positions=trial_states_target[j])
+            cand = atoms_target + mol_j
+            cand.set_cell(target_cell, scale_atoms=False)
+            cand.set_pbc(True)
+            atoms_target_with_trial[j] = cand
+            u_new[j] = self._compute_energy(cand) - E_target
+
+        # log-sum-exp for stability.
+        bu = beta * u_new
+        bu_min = np.min(bu)
+        if not np.isfinite(bu_min):
+            # All-overlap: every trial gave HIGH_ENERGY / inf. Reject.
+            self.swap_rosenbluth_zero += 1
+            return False
+        w_new_unnorm = np.exp(-(bu - bu_min))  # all in (0, 1]
+        sum_w_new = float(w_new_unnorm.sum())
+        if sum_w_new <= 0.0 or not np.isfinite(sum_w_new):
+            self.swap_rosenbluth_zero += 1
+            return False
+        log_W_new = np.log(sum_w_new) - bu_min  # = log(Σ exp(-β u_j))
+
+        # Pick the winning insertion state.
+        probs_new = w_new_unnorm / sum_w_new
+        s = int(np.random.choice(k, p=probs_new))
+        u_new_s = u_new[s]
+        atoms_target_trial_winner = atoms_target_with_trial[s]
+        E_target_new = E_target + u_new_s
+
+        # --- Reverse (source side): u_real + k-1 alternative placements. ---
+        u_real = E_source - E_source_minus
+
+        if k > 1:
+            trial_states_source = generate_trial_states(
+                template, source_cell, k - 1
+            )
+            u_alt = np.empty(k - 1, dtype=float)
+            for ell in range(k - 1):
+                mol_ell = Atoms(
+                    numbers=mol_numbers,
+                    positions=trial_states_source[ell],
+                )
+                cand = atoms_source_minus + mol_ell
+                cand.set_cell(source_cell, scale_atoms=False)
+                cand.set_pbc(True)
+                u_alt[ell] = self._compute_energy(cand) - E_source_minus
+            u_old_arr = np.concatenate(([u_real], u_alt))
+        else:
+            u_old_arr = np.array([u_real])
+
+        bu_old = beta * u_old_arr
+        bu_old_min = np.min(bu_old)
+        if not np.isfinite(bu_old_min):
+            # u_real is finite (real state is physical), so this should never
+            # happen unless an alt state is nan. Treat as reject.
+            self.swap_rosenbluth_zero += 1
+            return False
+        w_old_unnorm = np.exp(-(bu_old - bu_old_min))
+        sum_w_old = float(w_old_unnorm.sum())
+        if sum_w_old <= 0.0 or not np.isfinite(sum_w_old):
+            self.swap_rosenbluth_zero += 1
+            return False
+        log_W_old = np.log(sum_w_old) - bu_old_min
+
+        # --- Acceptance. ---
+        log_prefactor = (
+            np.log(N_source)
+            + np.log(V_target)
+            - np.log(N_target + 1)
+            - np.log(V_source)
+        )
+        arg = log_prefactor + (log_W_new - log_W_old)
+
+        if arg > EXP_THRESHOLD:
+            accepted = True
+        elif arg < -EXP_THRESHOLD:
+            accepted = False
+        else:
+            accepted = np.random.rand() < min(1.0, np.exp(arg))
+
+        if not accepted:
+            return False
+
+        # Commit accepted swap.
+        if source_id == 1:
+            self.atoms_box1 = atoms_source_minus
+            self.atoms_box2 = atoms_target_trial_winner
+            self.E1 = E_source_minus
+            self.E2 = E_target_new
+            self.N1 -= 1
+            self.N2 += 1
+        else:
+            self.atoms_box2 = atoms_source_minus
+            self.atoms_box1 = atoms_target_trial_winner
+            self.E2 = E_source_minus
+            self.E1 = E_target_new
+            self.N2 -= 1
+            self.N1 += 1
+        self.moves['swap']['accepted'] += 1
+        self._debug_print(
+            f'Accepted CBMC swap from box {source_id}: '
+            f'N1={self.N1}, N2={self.N2}'
+        )
+        return True
 
     def _log_step_binary(self, step):
         """Append step record to binary log file."""
@@ -893,6 +1163,15 @@ class MLP_Gibbs:
                 'swap_empty_source': self.swap_rejected_empty_source,
                 'volume_negative': self.volume_rejected_negative,
                 'volume_overlap': self.volume_rejected_overlap,
+                'swap_rosenbluth_zero': self.swap_rosenbluth_zero,
+            },
+            'sampling': {
+                'swap_variant': self.swap_variant,
+                'n_cbmc_trials': self.n_cbmc_trials,
+                'swap_vdw_screen': self.swap_vdw_screen,
+                'translation_step': self.translation_step,
+                'rotation_circlefrac': self.rotation_circlefrac,
+                'max_delta_V': self.max_delta_V,
             },
         }
         with open(json_path, 'w') as f:
@@ -935,6 +1214,39 @@ class MLP_Gibbs:
             self.swap_rejected_empty_source = rejections.get('swap_empty_source', 0)
             self.volume_rejected_negative = rejections.get('volume_negative', 0)
             self.volume_rejected_overlap = rejections.get('volume_overlap', 0)
+            self.swap_rosenbluth_zero = rejections.get('swap_rosenbluth_zero', 0)
+
+            # Sampling-config check: switching swap_variant mid-run is unsafe
+            # because the move statistics aren't directly comparable.
+            sampling = restart_data.get('sampling')
+            if sampling is not None:
+                prev_variant = sampling.get('swap_variant', 'plain')
+                if prev_variant != self.swap_variant:
+                    print(
+                        f"WARNING: restart used swap_variant={prev_variant!r}, "
+                        f"this run uses {self.swap_variant!r}. Move statistics "
+                        f"from the previous segment may be misleading."
+                    )
+                prev_k = sampling.get('n_cbmc_trials')
+                if prev_k is not None and prev_k != self.n_cbmc_trials:
+                    print(
+                        f"WARNING: restart used n_cbmc_trials={prev_k}, "
+                        f"this run uses {self.n_cbmc_trials}."
+                    )
+                # Inherit adapted step sizes so production picks up where
+                # equilibration left them.
+                for attr in ('translation_step', 'rotation_circlefrac', 'max_delta_V'):
+                    if attr in sampling:
+                        setattr(self, attr, float(sampling[attr]))
+            elif 'swap_rejected_vdw' in restart_data.get('rejections', {}):
+                # Old restart with no `sampling` block. Warn if the user is
+                # asking for CBMC now but the file came from a plain run.
+                if self.swap_variant != 'plain':
+                    print(
+                        "WARNING: restart file pre-dates swap_variant tracking; "
+                        "assuming the previous segment used plain swap. "
+                        f"This run uses {self.swap_variant!r}."
+                    )
 
             n_equil_completed = restart_data.get('n_equil_completed', 0) or 0
             n_prod_completed = restart_data.get('n_prod_completed', 0) or 0
@@ -1116,9 +1428,22 @@ class MLP_Gibbs:
 
             else:
                 self.moves['swap']['attempted'] += 1
-                success = self._move_swap()
+                if self.swap_variant == 'cbmc':
+                    success = self._move_swap_cbmc()
+                else:
+                    success = self._move_swap()
 
             current_step = iteration + 1 + iteration_offset
+
+            # Adaptive step sizing: only during equilibration, never during
+            # production (would break detailed balance).
+            if (
+                self.adapt_steps
+                and self.n_equilibration_steps is not None
+                and current_step <= self.n_equilibration_steps
+                and current_step % self.step_adapt_interval == 0
+            ):
+                self._adapt_step_sizes()
 
             if success:
                 self._log_step_binary(current_step)

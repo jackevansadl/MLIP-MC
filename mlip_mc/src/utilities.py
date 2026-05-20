@@ -77,6 +77,40 @@ def random_position(pos, rvecs):
     pos = _random_translation(pos, rvecs)
     return pos
 
+def generate_trial_states(template_positions, cell_vectors, n_trials):
+    """Generate ``n_trials`` random (position, orientation) candidates for a
+    rigid molecule inside ``cell_vectors``.
+
+    Used by the CBMC Gibbs swap move (see Frenkel-Smit Chapter 13 / RASPA3's
+    ``gibbs_swap_cbmc.cpp``). Each trial state is the molecule's atomic
+    positions in lab frame after applying a uniform random rotation and
+    placing the centre-of-mass at a uniformly-random point in the cell.
+
+    Parameters
+    ----------
+    template_positions : array_like, shape (n_atoms, 3)
+        Reference molecular geometry (rigid). The geometry is preserved; only
+        rotation + translation are sampled.
+    cell_vectors : array_like, shape (3, 3)
+        Box vectors of the target box.
+    n_trials : int
+        Number of independent trial states to generate.
+
+    Returns
+    -------
+    list of np.ndarray
+        Each element is an (n_atoms, 3) array of trial positions in lab
+        frame.
+    """
+    template = np.asarray(template_positions, dtype=float)
+    states = []
+    for _ in range(int(n_trials)):
+        rotated = _random_rotation(template.copy())
+        placed = _random_translation(rotated, cell_vectors)
+        states.append(placed)
+    return states
+
+
 def vdw_overlap(atoms, vdw, n_frame, n_ads, select_ads):
     """
     Check for van der Waals overlap between adsorbate and framework.
