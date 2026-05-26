@@ -130,7 +130,8 @@ class MLP_Gibbs:
         device,
         vdw_radii,
         move_probabilities=None,
-        max_delta_V=50.0,
+        max_delta_V=None,           # default depends on volume_variant; see below
+        volume_variant='log',       # 'log' = sample d(ln(V_A/V_B)) (RASPA), 'linear' = legacy ΔV
         translation_step=0.5,
         rotation_circlefrac=0.1,
         md_timestep=1.0,
@@ -163,7 +164,30 @@ class MLP_Gibbs:
         self.beta = 1.0 / (self.boltzmann * T)
         self.debug = debug
         self.output_dir = output_dir
-        self.max_delta_V = max_delta_V
+        # Volume-move variant: 'log' samples the trial in log-volume-ratio
+        # space (RASPA-style; handles strong vapor/liquid contrast cleanly);
+        # 'linear' uses the legacy ΔV ~ U[-max_delta_V, +max_delta_V] scheme.
+        if volume_variant not in ('log', 'linear'):
+            raise ValueError(
+                f"volume_variant must be 'log' or 'linear', got {volume_variant!r}"
+            )
+        self.volume_variant = volume_variant
+        if max_delta_V is None:
+            # Sensible default per scheme.
+            max_delta_V = 0.3 if volume_variant == 'log' else 50.0
+        self.max_delta_V = float(max_delta_V)
+        # Sanity check: warn if user passed a value that looks like the other
+        # variant's units.
+        if volume_variant == 'log' and self.max_delta_V > 5.0:
+            print(
+                f"WARNING: volume_variant='log' but max_delta_V={self.max_delta_V} "
+                "looks like a linear-mode value (typical log-mode range 0.05-1.5)."
+            )
+        if volume_variant == 'linear' and self.max_delta_V < 1.0:
+            print(
+                f"WARNING: volume_variant='linear' but max_delta_V={self.max_delta_V} "
+                "looks like a log-mode value (typical linear-mode range 1-500 Å³)."
+            )
         self.translation_step = translation_step
         self.rotation_circlefrac = rotation_circlefrac
         self.md_timestep = md_timestep
@@ -251,11 +275,13 @@ class MLP_Gibbs:
             default_target.update(target_acceptance)
         self.target_acceptance = default_target
 
-        # Step-size bounds for adaptation (see plan §1.2).
+        # Step-size bounds for adaptation. Volume bounds depend on the
+        # sampling variant: linear is in Å³, log is a dimensionless step
+        # in log(V_A/V_B) space.
         self._step_bounds = {
             'translation': (0.05, 5.0),
             'rotation': (0.01, 0.5),
-            'volume': (1.0, 500.0),
+            'volume': (1.0, 500.0) if volume_variant == 'linear' else (0.01, 2.0),
         }
         # Snapshot of move counters at last adaptation, so we adapt on
         # observed acceptance *over the adaptation window*, not lifetime.
@@ -695,22 +721,76 @@ class MLP_Gibbs:
         print(f"    Max force: {max_forces[0]:.4f} -> {max_forces[-1]:.4f} eV/A")
         print(f"    CSV: {csv_path}")
 
+    def _scale_box_com_preserving(self, atoms, n_molecules, L_new):
+        """Rescale ``atoms`` to a new cubic side length ``L_new`` by shifting
+        each molecule by the difference between its current centre of mass
+        and the scaled position. Internal molecular geometry is preserved
+        exactly (rigid-body translation), matching RASPA3's
+        ``scaledCenterOfMassPositions`` behaviour.
+
+        Returns a new ``Atoms`` object.
+        """
+        out = atoms.copy()
+        if n_molecules == 0 or len(out) == 0:
+            out.set_cell([L_new, L_new, L_new], scale_atoms=False)
+            return out
+
+        # Old volume from current cell (cubic by construction).
+        old_cell = out.get_cell().array
+        # For cubic cells the diagonal entries are L_old.
+        L_old = float(np.cbrt(np.abs(np.linalg.det(old_cell))))
+        scale = L_new / L_old if L_old > 0 else 1.0
+
+        positions = out.get_positions().copy()
+        n_mol = self.n_mol
+        for i in range(n_molecules):
+            start = i * n_mol
+            end = start + n_mol
+            com_old = positions[start:end].mean(axis=0)
+            shift = com_old * (scale - 1.0)
+            positions[start:end] += shift
+        out.set_positions(positions)
+        out.set_cell([L_new, L_new, L_new], scale_atoms=False)
+        return out
+
     def _move_volume(self):
         """
         Perform a coupled volume change move preserving total volume.
 
-        Acceptance criterion (Eq. 7 of Heijmans et al., 2021):
-            acc(o->n) = min(1, (V1_new/V1)^N1 * (V2_new/V2)^N2
-                         * exp(-beta * (U_new - U_old)))
+        Two sampling schemes:
+
+        * ``volume_variant='linear'`` (legacy):
+            dV ~ U[-max_delta_V, +max_delta_V], V1' = V1 + dV, V2' = V2 - dV.
+            Acceptance Jacobian per box: N * ln(V_new / V_old).
+
+        * ``volume_variant='log'`` (RASPA-style, default):
+            sample d(ln(V_A/V_B)) ~ U[-max_delta_V, +max_delta_V], then
+            split the conserved total volume by the new ratio. Acceptance
+            Jacobian per box: (N + 1) * ln(V_new / V_old) -- the +1 absorbs
+            the V -> ln V coordinate change. This is the right scheme for
+            strong vapor/liquid contrast: the step is symmetric in
+            proportional terms regardless of how unequal the boxes are.
+
+        Both schemes follow Heijmans et al. (2021) Eq. 7 / RASPA3
+        ``gibbs_volume.cpp``.
 
         Returns
         -------
         bool
-            True if accepted
+            True if accepted.
         """
-        dV = self.max_delta_V * (2.0 * np.random.rand() - 1.0)
-        V1_new = self.V1 + dV
-        V2_new = self.V2 - dV
+        if self.volume_variant == 'log':
+            total_V = self.V1 + self.V2
+            delta = self.max_delta_V * (2.0 * np.random.rand() - 1.0)
+            expdv = np.exp(np.log(self.V1 / self.V2) + delta)
+            V1_new = expdv * total_V / (1.0 + expdv)
+            V2_new = total_V - V1_new
+            jac_n_offset = 1.0  # acceptance uses (N + 1) ln(V_new/V_old)
+        else:
+            dV = self.max_delta_V * (2.0 * np.random.rand() - 1.0)
+            V1_new = self.V1 + dV
+            V2_new = self.V2 - dV
+            jac_n_offset = 0.0  # acceptance uses N ln(V_new/V_old)
 
         # Reject if either volume is non-positive
         if V1_new <= 0.0 or V2_new <= 0.0:
@@ -720,15 +800,15 @@ class MLP_Gibbs:
         L1_new = V1_new ** (1.0 / 3.0)
         L2_new = V2_new ** (1.0 / 3.0)
 
-        # Scale box 1
-        atoms_trial1 = self.atoms_box1.copy()
-        if len(atoms_trial1) > 0:
-            atoms_trial1.set_cell([L1_new, L1_new, L1_new], scale_atoms=False)
-
-        # Scale box 2
-        atoms_trial2 = self.atoms_box2.copy()
-        if len(atoms_trial2) > 0:
-            atoms_trial2.set_cell([L2_new, L2_new, L2_new], scale_atoms=False)
+        # Rescale boxes preserving molecular geometry: each molecule shifts
+        # by (scale - 1) * com so internal bond lengths stay intact (rigid
+        # molecule). Matches RASPA3's scaledCenterOfMassPositions.
+        atoms_trial1 = self._scale_box_com_preserving(
+            self.atoms_box1, self.N1, L1_new
+        )
+        atoms_trial2 = self._scale_box_com_preserving(
+            self.atoms_box2, self.N2, L2_new
+        )
 
         # Check overlaps in both boxes
         if self.N1 > 1 and self._any_overlap_in_box(atoms_trial1, self.N1):
@@ -746,9 +826,9 @@ class MLP_Gibbs:
         dE = (E1_trial + E2_trial) - (self.E1 + self.E2)
         arg = -self.beta * dE
         if self.N1 > 0:
-            arg += self.N1 * np.log(V1_new / self.V1)
+            arg += (self.N1 + jac_n_offset) * np.log(V1_new / self.V1)
         if self.N2 > 0:
-            arg += self.N2 * np.log(V2_new / self.V2)
+            arg += (self.N2 + jac_n_offset) * np.log(V2_new / self.V2)
 
         if arg > EXP_THRESHOLD:
             accepted = True
@@ -1195,6 +1275,7 @@ class MLP_Gibbs:
                 'swap_variant': self.swap_variant,
                 'n_cbmc_trials': self.n_cbmc_trials,
                 'swap_vdw_screen': self.swap_vdw_screen,
+                'volume_variant': self.volume_variant,
                 'translation_step': self.translation_step,
                 'rotation_circlefrac': self.rotation_circlefrac,
                 'max_delta_V': self.max_delta_V,
@@ -1261,6 +1342,13 @@ class MLP_Gibbs:
                     print(
                         f"WARNING: restart used n_cbmc_trials={prev_k}, "
                         f"this run uses {self.n_cbmc_trials}."
+                    )
+                prev_volvar = sampling.get('volume_variant')
+                if prev_volvar is not None and prev_volvar != self.volume_variant:
+                    print(
+                        f"WARNING: restart used volume_variant={prev_volvar!r}, "
+                        f"this run uses {self.volume_variant!r}. The meaning "
+                        f"of max_delta_V differs between schemes."
                     )
                 # Inherit adapted step sizes so production picks up where
                 # equilibration left them.
