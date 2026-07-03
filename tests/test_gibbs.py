@@ -489,7 +489,10 @@ class TestSwapMove:
         zero_vdw = vdw_radii.copy()
         zero_vdw[:] = 0.0
 
-        # Initialize with zero VDW to allow placement
+        # Initialize with zero VDW to allow placement. The VDW pre-screen
+        # is opt-in (default off, matching RASPA3 which rejects overlaps
+        # via the energy); enable it since the mock model's zero energy
+        # cannot reject anything.
         np.random.seed(42)
         g = MLP_Gibbs(
             model=model,
@@ -501,6 +504,7 @@ class TestSwapMove:
             L2_init=10.0,
             device='cpu',
             vdw_radii=zero_vdw,
+            swap_vdw_screen=True,
         )
         g.E1 = 0.0
         g.E2 = 0.0

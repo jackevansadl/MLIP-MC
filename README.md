@@ -92,8 +92,33 @@ mlip_mc \\
     --output-dir widom_results
 ```
 
+#### Transition-Matrix Monte Carlo (TMMC)
+
+TMMC computes the macrostate probability distribution ln Π(N) at a single
+reference fugacity with a flat-histogram bias, then reweights it to every
+pressure — the complete isotherm from one simulation. With a flexible
+framework (hybrid MC/MD moves), a bimodal ln Π yields both metastable
+adsorption/desorption branches (hysteresis) and the equilibrium step
+pressure, following Goeminne & Van Speybroeck, *JACS* 2025
+(doi:10.1021/jacs.4c15287).
+
+```bash
+# Full water isotherm with a flexible framework from a single run
+mlip_mc \\
+    --mode tmmc \\
+    --adsorbent framework.cif \\
+    --adsorbate-molecule H2O \\
+    --temperature 298.0 \\
+    --reference-pressure 0.02 \\
+    --n-steps 500000 \\
+    --n-min 0 --n-max 120 \\
+    --md-probability 0.02 \\
+    --model models/model.pt \\
+    --output-dir tmmc_results
+```
+
 **Command-Line Arguments:**
-- `--mode`: Simulation mode: `gcmc` (Grand Canonical Monte Carlo) or `widom` (Widom insertion) (default: `gcmc`)
+- `--mode`: Simulation mode: `gcmc` (Grand Canonical Monte Carlo), `widom` (Widom insertion), or `tmmc` (Transition-Matrix Monte Carlo) (default: `gcmc`)
 - `--adsorbent`: Path to adsorbent structure file (.xyz, .cif, etc.) **(required)**
 - `--adsorbate-path`: Path to adsorbate structure file (optional). The chemical formula will be automatically extracted to match with the fugacity table.
 - `--adsorbate-molecule`: Molecule name (e.g., CO2, CH4) if not using file. This name will be used to match with the fugacity table.
@@ -110,6 +135,17 @@ mlip_mc \\
 - `--hf-token`: Hugging Face access token for downloading private models or bypassing interactive login (optional)
 - `--gpu-id`: GPU device ID to use (for Widom mode, default: 0, use -1 for CPU)
 - `overwrite_checkpoints`: Specifies to overwrite checkpoint files every `--checkpoint-interval` steps (default: False)
+
+**TMMC-specific arguments (`--mode tmmc`):**
+- `--reference-pressure`: Pressure in bar at which ln Π is sampled (default: 1.0). Any value works; one near the isotherm step gives the best statistics.
+- `--n-steps`: Total number of TMMC steps (default: 100000)
+- `--n-min`, `--n-max`: Macrostate window — the range of adsorbed-molecule counts to sample (defaults: 0, 100). Choose `--n-max` above saturation loading.
+- `--bias-update-interval`: Steps between ln Π bias refreshes from the collection matrix (default: 10000)
+- `--md-probability`: Probability of hybrid MC/MD framework-flexibility moves (default: 0.0 = rigid framework)
+- `--md-ensemble`: `nvt` (default) or `npt` for the hybrid MD moves (`npt` requires stress support and an upper-triangular cell)
+- `--md-steps`, `--md-timestep`: MD trajectory length and timestep in fs per hybrid move (defaults: 1000, 1.0)
+- `--volume-probability`: Probability of MC volume moves for cell fluctuations (default: 0.0)
+- `--pressures`: Optional comma-separated pressures in bar for the reweighted isotherm (default: 40 points spanning `reference-pressure` / 100 to × 100)
 
 **Model caching:** When using the `hf://` scheme, downloads are cached under `~/.cache/mlip-mc/<repo>/<filename>` (or a custom directory set via the `MLIP_MC_CACHE` environment variable). Subsequent runs reuse the cached file even when launched from different working directories.
 
@@ -164,6 +200,33 @@ results = run_widom(
 )
 ```
 
+#### Transition-Matrix Monte Carlo
+
+```python
+from mlip_mc import run_tmmc
+
+results = run_tmmc(
+    adsorbent_path="framework.cif",
+    adsorbate_molecule="H2O",
+    temperature=298.0,
+    reference_pressure=0.02,       # bar
+    n_steps=500_000,
+    N_min=0, N_max=120,
+    md_probability=0.02,           # hybrid MC/MD flexibility moves
+    model_path="models/model.pt",
+    output_dir="tmmc_results",
+)
+
+isotherm = results['isotherm']
+print(isotherm['pressure_bar'], isotherm['mean_N'])
+# Hysteresis: metastable branches and equilibrium step pressure
+print(isotherm['N_low'], isotherm['N_high'])
+print(isotherm['transition_pressure_bar'])
+```
+
+See `examples/tmmc_co2_trappe/` for a fast classical-forcefield example
+and the flexible-framework recipe.
+
 ## Output Files
 
 Simulations generate output files in the specified output directory (default: `results/`):
@@ -188,6 +251,13 @@ Simulations generate output files in the specified output directory (default: `r
   - `log_widom.bin`: Binary log file containing all valid insertions with trajectory data (trial number, adsorption energy, total energy, atomic structure) - one record per valid insertion
   - `widom_trajectory.xyz`: Last valid insertion structure saved at the end of simulation
   - `restart/restart_widom.xyz` and `.json`: Restart information (updated every step for crash recovery)
+
+- **TMMC (using `run_tmmc()`)**:
+  - `tmmc_results.json`: ln Π(N), visit histogram, reweighted isotherm with hysteresis branches (`N_low`/`N_high`), and equilibrium transition pressure
+  - `lnPi_{pressure}bar.json`: Running ln Π estimate, visit histogram, and collection matrix (refreshed at every bias update)
+  - `results_tmmc_{pressure}bar.json`: Final distribution and collection matrix
+  - `log_tmmc_{pressure}bar.bin`: Binary log of accepted moves (same layout as the GCMC log; readable with `read_binary_log`)
+  - `restart/restart_tmmc_{pressure}bar.xyz` and `.json`: Restart information including the collection matrix (a rerun with the same parameters resumes toward the target step count)
 
 ### Isotherm Data Format
 

@@ -1,0 +1,71 @@
+# MLIP-MC — Orbital (orb-models) backend for older-driver GPU clusters.
+#
+# Target hardware: NVIDIA A100 nodes running driver 510.47.03.
+#   Driver 510.47.03 only supports up to CUDA 11.6, so a CUDA 12.x image
+#   (e.g. Dockerfile.cuda) will FAIL on this machine — even under Apptainer
+#   `--nv`, because the container's CUDA runtime binds to the *host* driver.
+#
+#   We therefore build against the cu118 PyTorch wheels. CUDA "Enhanced
+#   Compatibility" lets a CUDA 11.x application run on any driver >= R450
+#   (the 11.0 base driver), and 510.47.03 is well above that, so cu118
+#   binaries run correctly on this A100 node.
+#
+# A100 (compute capability 8.0) is fully supported by CUDA 11.x.
+#
+# Build (Docker):
+#   docker build -f Dockerfile.orb-cuda11 -t mlip-mc-orb:cu118 .
+#
+# See apptainer/build_orb_cuda11.sh for converting this to a .sif for the
+# supercomputer.
+
+# NOTE: must be linux/amd64 — the cluster's A100 nodes are x86_64, and the
+# cu118 PyTorch wheels are x86_64-only. Pinning the platform here means the
+# build is correct even on an arm64 host (e.g. Apple Silicon), where it would
+# otherwise produce an arm64 image with no usable torch wheels.
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies. build-essential + python3-dev are needed because
+# pynanoflann is compiled from a git source distribution.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-dev \
+        build-essential \
+        git \
+        libjpeg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make `python` resolve to python3 for convenience inside the container.
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+RUN pip install --no-cache-dir --upgrade pip
+
+ENV MLIP_BACKEND=orb-models
+
+# PyTorch built for CUDA 11.8 (cu118). torch 2.6.0 is the last release line
+# that still ships cu118 wheels and is supported by orb-models.
+RUN pip install --no-cache-dir \
+        torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+        --index-url https://download.pytorch.org/whl/cu118
+
+# Orbital backend. pynanoflann provides the neighbour-list kernels orb-models
+# relies on; it is installed from the pinned git source.
+RUN pip install --no-cache-dir orb-models && \
+    pip install --no-cache-dir \
+        "pynanoflann @ git+https://github.com/dwastberg/pynanoflann#egg=af434039ae14bedcbb838a7808924d6689274168"
+
+WORKDIR /app
+COPY . /app
+
+# Install MLIP-MC with the orbital backend.
+RUN pip install --no-cache-dir ".[orb-models]"
+
+# HuggingFace / orb model cache. Override at runtime with a bind mount so
+# pretrained weights persist on the cluster filesystem between jobs.
+ENV HF_HOME=/cache/huggingface \
+    MLIP_MC_CACHE=/cache/mlip-mc
+
+CMD ["/bin/bash"]

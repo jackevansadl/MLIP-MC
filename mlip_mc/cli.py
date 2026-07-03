@@ -11,7 +11,7 @@ import argparse
 import multiprocessing as mp
 import traceback
 from typing import Union, List
-from .main import run_gcmc, run_widom
+from .main import run_gcmc, run_widom, run_tmmc
 
 
 def parse_pressures(pressure_str: str) -> Union[float, List[float]]:
@@ -77,11 +77,25 @@ Examples:
       --temperature 298.0 \\
       --n-trials 10000 \\
       --output-dir widom_results
+
+  # TMMC: full isotherm (with hysteresis) from one simulation,
+  # flexible framework via hybrid MC/MD moves
+  mlip_mc \\
+      --mode tmmc \\
+      --adsorbent framework.xyz \\
+      --adsorbate-molecule H2O \\
+      --temperature 298.0 \\
+      --reference-pressure 0.02 \\
+      --n-steps 500000 \\
+      --n-min 0 --n-max 120 \\
+      --md-probability 0.02 \\
+      --output-dir tmmc_results
         """
     )
-    
-    parser.add_argument('--mode', type=str, default='gcmc', choices=['gcmc', 'widom'],
-                        help='Simulation mode: gcmc (Grand Canonical Monte Carlo) or widom (Widom insertion) (default: gcmc)')
+
+    parser.add_argument('--mode', type=str, default='gcmc', choices=['gcmc', 'widom', 'tmmc'],
+                        help='Simulation mode: gcmc (Grand Canonical Monte Carlo), widom (Widom insertion), '
+                             'or tmmc (Transition-Matrix Monte Carlo) (default: gcmc)')
     parser.add_argument('--adsorbent', type=str, required=True,
                         help='Path to adsorbent structure file (.xyz, .cif, etc.)')
     parser.add_argument('--adsorbate-path', type=str, default=None,
@@ -116,6 +130,29 @@ Examples:
                         help='Write trajectory files')
     parser.add_argument('--orb-variant', type=str, default='omat', choices=['omat', 'omol'],
                         help='ORB model variant: omat (default, orb_v3_conservative_inf_omat) or omol (orb_v3_conservative_omol, charge=0 spin=1)')
+
+    # TMMC-specific options
+    tmmc_group = parser.add_argument_group('TMMC options (--mode tmmc)')
+    tmmc_group.add_argument('--reference-pressure', type=float, default=1.0,
+                            help='Reference pressure in bar at which ln Pi is sampled (default: 1.0)')
+    tmmc_group.add_argument('--n-steps', type=int, default=100000,
+                            help='Total number of TMMC steps (default: 100000)')
+    tmmc_group.add_argument('--n-min', type=int, default=0,
+                            help='Lower bound of the macrostate window (default: 0)')
+    tmmc_group.add_argument('--n-max', type=int, default=100,
+                            help='Upper bound of the macrostate window (default: 100)')
+    tmmc_group.add_argument('--bias-update-interval', type=int, default=10000,
+                            help='Steps between ln Pi bias refreshes (default: 10000)')
+    tmmc_group.add_argument('--md-probability', type=float, default=0.0,
+                            help='Probability of hybrid MC/MD framework-flexibility moves (default: 0.0 = rigid)')
+    tmmc_group.add_argument('--md-ensemble', type=str, default='nvt', choices=['nvt', 'npt'],
+                            help='Ensemble for hybrid MD moves (default: nvt)')
+    tmmc_group.add_argument('--md-steps', type=int, default=1000,
+                            help='MD steps per hybrid move (default: 1000)')
+    tmmc_group.add_argument('--md-timestep', type=float, default=1.0,
+                            help='MD timestep in fs (default: 1.0)')
+    tmmc_group.add_argument('--volume-probability', type=float, default=0.0,
+                            help='Probability of MC volume moves (default: 0.0)')
     return parser.parse_args()
 
 
@@ -139,7 +176,36 @@ def main() -> None:
     
     # Run simulation based on mode
     try:
-        if args.mode == 'widom':
+        if args.mode == 'tmmc':
+            # Transition-Matrix Monte Carlo mode
+            isotherm_pressures = None
+            if args.pressures is not None:
+                pressures = parse_pressures(args.pressures)
+                isotherm_pressures = pressures if isinstance(pressures, list) else [pressures]
+
+            run_tmmc(
+                adsorbent_path=args.adsorbent,
+                adsorbate_path=args.adsorbate_path,
+                adsorbate_molecule=args.adsorbate_molecule,
+                temperature=args.temperature,
+                reference_pressure=args.reference_pressure,
+                n_steps=args.n_steps,
+                N_min=args.n_min,
+                N_max=args.n_max,
+                bias_update_interval=args.bias_update_interval,
+                isotherm_pressures=isotherm_pressures,
+                md_probability=args.md_probability,
+                md_ensemble=args.md_ensemble,
+                md_steps=args.md_steps,
+                md_timestep=args.md_timestep,
+                volume_probability=args.volume_probability,
+                model_path=args.model,
+                output_dir=args.output_dir,
+                hf_token=args.hf_token,
+                gpu_id=gpu_id,
+                orb_model_variant=args.orb_variant,
+            )
+        elif args.mode == 'widom':
             # Widom insertion mode
             if args.pressures is not None:
                 print("WARNING: --pressures is ignored in Widom mode", file=sys.stderr)

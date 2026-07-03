@@ -1206,8 +1206,342 @@ def run_widom(
     _print_section_header("Simulation Complete")
     print(f"  Results saved to: {output_dir}/")
     print()
-    
+
     return widom_data
+
+
+def run_tmmc(
+    adsorbent_path: str,
+    model_path: str,
+    adsorbate_path: Optional[str] = None,
+    adsorbate_molecule: Optional[str] = None,
+    temperature: float = 298.0,
+    reference_pressure: float = 1.0,
+    n_steps: int = 100000,
+    N_min: int = 0,
+    N_max: int = 100,
+    bias_update_interval: int = 10000,
+    isotherm_pressures: Optional[List[float]] = None,
+    md_probability: float = 0.0,
+    md_ensemble: str = 'nvt',
+    md_steps: int = 1000,
+    md_timestep: float = 1.0,
+    md_damp: float = 100.0,
+    volume_probability: float = 0.0,
+    max_delta_lnV: float = 0.01,
+    output_dir: str = 'results',
+    hf_token: Optional[str] = None,
+    gpu_id: Union[int, str] = 0,
+    orb_model_variant: str = 'omat',
+) -> Dict[str, Any]:
+    """
+    Run a Transition-Matrix Monte Carlo simulation and compute the full
+    adsorption isotherm (including hysteresis branches) by reweighting.
+
+    A single TMMC run at one reference fugacity yields the macrostate
+    probability distribution ln Pi(N), which is reweighted to every
+    requested pressure. When the framework is flexible (md_probability
+    > 0), hybrid MC/MD moves sample framework deformation, and a bimodal
+    ln Pi produces metastable adsorption/desorption branches.
+
+    Parameters
+    ----------
+    adsorbent_path : str
+        Path to adsorbent (framework) structure file.
+    model_path : str
+        Path to the MLIP model file (local path or hf:// URI).
+    adsorbate_path : str, optional
+        Path to adsorbate molecule structure file.
+    adsorbate_molecule : str, optional
+        Name of molecule to build using ASE (e.g. 'CO2', 'H2O').
+    temperature : float, optional
+        Temperature in Kelvin (default: 298.0).
+    reference_pressure : float, optional
+        Reference pressure in bar at which ln Pi is sampled (default: 1.0).
+        Any pressure works; choose one near the isotherm step for best
+        statistics.
+    n_steps : int, optional
+        Total number of MC steps (default: 100000).
+    N_min, N_max : int, optional
+        Macrostate window (number of adsorbed molecules).
+    bias_update_interval : int, optional
+        Steps between ln Pi bias refreshes (default: 10000).
+    isotherm_pressures : list of float, optional
+        Pressures (bar) for the reweighted isotherm. Default: 40 points
+        logarithmically spaced over [reference_pressure/100,
+        reference_pressure*100].
+    md_probability : float, optional
+        Probability of hybrid MC/MD framework-flexibility moves
+        (default: 0.0 = rigid framework).
+    md_ensemble : str, optional
+        'nvt' or 'npt' MD for the hybrid moves (default: 'nvt').
+    md_steps, md_timestep, md_damp : optional
+        MD trajectory length (steps), timestep (fs), thermostat damping (fs).
+    volume_probability : float, optional
+        Probability of MC volume moves for cell fluctuations (default: 0.0).
+    max_delta_lnV : float, optional
+        Maximum ln-volume displacement per volume move (default: 0.01).
+    output_dir : str, optional
+        Directory to save results (default: 'results').
+    hf_token : str, optional
+        Hugging Face authentication token.
+    gpu_id : int or str, optional
+        GPU device ID (int) or 'cpu' (default: 0).
+
+    Returns
+    -------
+    dict
+        TMMC results: ln Pi data, reweighted isotherm with hysteresis
+        branches, and the equilibrium transition pressure (if any).
+    """
+    _print_banner()
+    _print_section_header("Transition-Matrix Monte Carlo Simulation")
+
+    import torch
+    from mlip_mc.src.tmmc import MLP_TMMC
+    from mlip_mc.src.utilities import PREOS
+    from mlip_mc.src import tmmc_analysis
+
+    # Check available GPUs
+    _print_subsection("Hardware Configuration")
+    if torch.cuda.is_available():
+        n_gpus = torch.cuda.device_count()
+        _print_info("GPUs Available", f"{n_gpus}")
+        for i in range(n_gpus):
+            _print_info(f"  GPU {i}", torch.cuda.get_device_name(i))
+    else:
+        n_gpus = 0
+        _print_warning("No GPUs available, using CPU")
+
+    backend = _detect_backend()
+
+    model_path, hf_repo_id, hf_model_filename, is_hf = _resolve_model_spec(model_path)
+
+    _print_subsection("Model Configuration")
+    if is_hf:
+        cache_path = MODEL_CACHE_ROOT / hf_repo_id / hf_model_filename
+        if os.path.exists(cache_path):
+            model_path = str(cache_path)
+            _print_info("Model Status", f"Found in cache at {model_path}")
+        elif not os.path.exists(model_path):
+            _print_info("Model Status", f"Not found at {model_path}")
+            _print_info("Action", "Downloading from Hugging Face Hub...")
+            try:
+                model_path = download_model_from_huggingface(
+                    model_path,
+                    repo_id=hf_repo_id,
+                    filename=hf_model_filename,
+                    token=hf_token
+                )
+                _print_success(f"Model downloaded successfully to: {model_path}")
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    f"Failed to download from Hugging Face: {e}\n"
+                    "Please ensure the model file exists or check your Hugging Face authentication."
+                )
+        else:
+            _print_info("Model Status", f"Found at {model_path}")
+    else:
+        if not os.path.exists(model_path):
+            if backend == 'orb-models':
+                _print_info(
+                    "Model Status",
+                    "Local model file not found; using orb-models pretrained checkpoint "
+                    "(weights will be downloaded/cached automatically).",
+                )
+                model_path = None
+            else:
+                raise FileNotFoundError(
+                    f"Model file not found at {model_path}\n"
+                    "Please provide a valid local model path or use the "
+                    "'hf://' scheme to download from Hugging Face."
+                )
+        else:
+            _print_info("Model Status", f"Using local model at {model_path}")
+
+    _print_subsection("Structure Loading")
+    if not os.path.exists(adsorbent_path):
+        raise FileNotFoundError(f"Adsorbent file not found: {adsorbent_path}")
+
+    _print_info("Adsorbent", f"Loading from {adsorbent_path}...")
+    atoms_frame = read(adsorbent_path)
+    atoms_frame = Atoms(
+        numbers=atoms_frame.numbers,
+        positions=atoms_frame.positions,
+        cell=atoms_frame.cell,
+        pbc=atoms_frame.pbc
+    )
+    atoms_frame.info["charge"] = 0
+    atoms_frame.info["spin"] = 1
+
+    if adsorbate_path is not None:
+        if not os.path.exists(adsorbate_path):
+            raise FileNotFoundError(f"Adsorbate file not found: {adsorbate_path}")
+        _print_info("Adsorbate", f"Loading from {adsorbate_path}...")
+        atoms_ads = read(adsorbate_path)
+        atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
+        adsorbate_name = atoms_ads.get_chemical_formula().replace(' ', '')
+        _print_info("Adsorbate Name", adsorbate_name)
+    elif adsorbate_molecule is not None:
+        _print_info("Adsorbate", f"Creating {adsorbate_molecule} molecule...")
+        atoms_ads = molecule(adsorbate_molecule)
+        atoms_ads = Atoms(numbers=atoms_ads.numbers, positions=atoms_ads.positions)
+        adsorbate_name = adsorbate_molecule
+        _print_info("Adsorbate Name", adsorbate_name)
+    else:
+        raise ValueError("Either adsorbate_path or adsorbate_molecule must be provided")
+
+    atoms_ads.info["charge"] = 0
+    atoms_ads.info["spin"] = 1
+
+    P_ref = reference_pressure * bar
+    fugacity = tmmc_analysis.fugacity_from_pressure(temperature, P_ref, adsorbate_name)
+
+    _print_subsection("Simulation Parameters")
+    _print_info("Temperature", f"{temperature} K")
+    _print_info("Reference Pressure", f"{reference_pressure} bar")
+    _print_info("Reference Fugacity", f"{fugacity/bar:.4f} bar")
+    _print_info("Macrostate Window", f"[{N_min}, {N_max}]")
+    _print_info("MC Steps", f"{n_steps}")
+    _print_info("Bias Update Interval", f"{bias_update_interval}")
+    if md_probability > 0:
+        _print_info("Framework Flexibility", f"MD moves ({md_ensemble.upper()}), p = {md_probability}")
+    else:
+        _print_info("Framework Flexibility", "Rigid framework")
+    if volume_probability > 0:
+        _print_info("Volume Moves", f"p = {volume_probability}")
+
+    # Cumulative move probabilities; the GCMC 25/25/25/25 split scaled
+    # into whatever remains after MD and volume moves
+    remaining = 1.0 - md_probability - volume_probability
+    if remaining <= 0:
+        raise ValueError("md_probability + volume_probability must be < 1")
+    move_probabilities = {
+        'md': md_probability,
+        'volume': md_probability + volume_probability,
+        'insertion': md_probability + volume_probability + 0.25 * remaining,
+        'deletion': md_probability + volume_probability + 0.50 * remaining,
+        'translation': md_probability + volume_probability + 0.75 * remaining,
+        'rotation': 1.0,
+    }
+
+    _print_subsection("Simulation Execution")
+
+    if isinstance(gpu_id, int) and gpu_id >= 0 and torch.cuda.is_available():
+        if gpu_id >= torch.cuda.device_count():
+            _print_warning(f"GPU {gpu_id} not available, using GPU 0")
+            gpu_id = 0
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        device = 'cuda'
+        device_str = f"GPU {gpu_id}"
+    else:
+        device = 'cpu'
+        device_str = "CPU"
+
+    _print_info("Device", device_str)
+    _print_info("Backend", backend)
+
+    model = _load_model(model_path, device=device, backend=backend, orb_model_variant=orb_model_variant)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    tmmc = MLP_TMMC(
+        model=model,
+        atoms_frame=atoms_frame,
+        atoms_ads=atoms_ads,
+        T=temperature,
+        P=P_ref,
+        fugacity=fugacity,
+        device=device,
+        vdw_radii=vdw_radii,
+        N_min=N_min,
+        N_max=N_max,
+        bias_update_interval=bias_update_interval,
+        move_probabilities=move_probabilities,
+        md_ensemble=md_ensemble,
+        md_timestep=md_timestep,
+        md_steps=md_steps,
+        md_damp=md_damp,
+        max_delta_lnV=max_delta_lnV,
+        output_dir=output_dir,
+        n_steps=n_steps,
+    )
+
+    print(f"\n  [{device_str}] Running {n_steps} TMMC steps...")
+    tmmc.run(N=n_steps)
+
+    # ------------------------------------------------------------------
+    # Post-processing: reweighted isotherm + hysteresis analysis
+    # ------------------------------------------------------------------
+    _print_section_header("Isotherm Reweighting")
+
+    if isotherm_pressures is None:
+        isotherm_pressures = list(np.logspace(
+            np.log10(reference_pressure / 100.0),
+            np.log10(reference_pressure * 100.0),
+            40))
+
+    N_grid = np.arange(N_min, N_max + 1)
+    isotherm = tmmc_analysis.compute_isotherm(
+        lnPi_ref=tmmc.lnPi,
+        N_grid=N_grid,
+        T=temperature,
+        pressures_bar=isotherm_pressures,
+        f_ref=fugacity,
+        molecule=adsorbate_name,
+    )
+
+    framework_mass = float(atoms_frame.get_masses().sum()) if len(atoms_frame) > 0 else None
+    if framework_mass:
+        isotherm['uptake_mol_per_kg'] = [
+            tmmc_analysis.uptake_mol_per_kg(n, framework_mass) for n in isotherm['mean_N']]
+
+    tmmc_data = {
+        'temperature': temperature,
+        'reference_pressure_bar': reference_pressure,
+        'reference_fugacity': float(fugacity),
+        'adsorbate': adsorbate_name,
+        'N_min': N_min,
+        'N_max': N_max,
+        'N_grid': N_grid.tolist(),
+        'lnPi': tmmc.lnPi.tolist(),
+        'H': tmmc.H.tolist(),
+        'framework_mass_amu': framework_mass,
+        'isotherm': isotherm,
+    }
+
+    results_file = os.path.join(output_dir, 'tmmc_results.json')
+    with open(results_file, 'w') as f:
+        json.dump(tmmc_data, f, indent=4)
+    _print_success(f"TMMC results saved to {results_file}")
+
+    _print_section_header("Isotherm Summary")
+    headers = ["Pressure (bar)", "<N> (mol/uc)", "N_low", "N_high", "Stable"]
+    rows = []
+    for i, p in enumerate(isotherm['pressure_bar']):
+        n_low = isotherm['N_low'][i]
+        n_high = isotherm['N_high'][i]
+        rows.append([
+            f"{p:.4g}",
+            f"{isotherm['mean_N'][i]:.3f}",
+            f"{n_low:.3f}" if n_low is not None else "-",
+            f"{n_high:.3f}" if n_high is not None else "-",
+            isotherm['stable_branch'][i] or "-",
+        ])
+    _print_table(headers, rows)
+
+    if isotherm['transition_pressure_bar'] is not None:
+        _print_info("Equilibrium Transition Pressure",
+                    f"{isotherm['transition_pressure_bar']:.4g} bar")
+        _print_info("Hysteresis", "Bimodal ln Pi detected: metastable branches reported")
+
+    print()
+    _print_section_header("Simulation Complete")
+    print(f"  Results saved to: {output_dir}/")
+    print()
+
+    return tmmc_data
 
 
 def parse_arguments() -> argparse.Namespace:
