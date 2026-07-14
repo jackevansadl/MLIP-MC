@@ -4,17 +4,18 @@ ASE framework for Monte Carlo simulations with universal Machine-Learned Interat
 
 ## Overview
 
-MLIP-MC is a Python package for performing Monte Carlo simulations of gas adsorption in porous materials using machine-learned interatomic potentials. The package integrates seamlessly with the ASE (Atomic Simulation Environment) framework and supports MLIP models from **FAIRChem**, **MACE-Torch** and **Orbital** backends.
+MLIP-MC is a Python package for performing Monte Carlo simulations of gas adsorption in porous materials using machine-learned interatomic potentials. The package integrates seamlessly with the ASE (Atomic Simulation Environment) framework and supports MLIP models from **FAIRChem**, **MACE-Torch**, **Orbital** and **Metatomic** (metatrain) backends.
 
 ## Installation
 
 ### Backend Selection
 
-MLIP-MC supports three MLIP backends. You must install one of them:
+MLIP-MC supports four MLIP backends. You must install one of them:
 
 - **FAIRChem**: For models trained with FAIRChem (e.g., OC20, OC22 models)
 - **MACE-Torch**: For MACE models (e.g., MACE-MP models)
 - **Orbital**: For Orbital models (e.g. orb_v3_conservative_inf_omat)
+- **Metatomic**: For potentials trained with [metatrain](https://docs.metatensor.org/metatrain/) (e.g. PET-MAD, or your own `mtt train` models) and exported with `mtt export`
 
 ### Install from PyPI (Recommended)
 
@@ -35,6 +36,11 @@ pip install "mlip-mc[mace-torch]"
 pip install "mlip-mc[orb-models]"
 ```
 
+**With Metatomic backend (metatrain models):**
+```bash
+pip install "mlip-mc[metatomic]"
+```
+
 > **ROCm users:** Install the ROCm version of PyTorch first before installing MLIP-MC:
 > ```bash
 > pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4
@@ -47,7 +53,7 @@ Clone the repository and install locally:
 ```bash
 git clone https://github.com/jackevansadl/MLIP-MC.git
 cd MLIP-MC
-pip install ".[fairchem]"   # or ".[mace-torch]" or ".[orb-models]"
+pip install ".[fairchem]"   # or ".[mace-torch]", ".[orb-models]", ".[metatomic]"
 ```
 
 **Development mode (includes test tooling):**
@@ -128,7 +134,8 @@ mlip_mc \\
 - `--n-prod`: Number of production steps for GCMC (default: 20000)
 - `--n-trials`: Number of Widom insertion trials (default: 10000)
 - `--checkpoint-interval`: Interval for saving history checkpoints in GCMC (default: 10000)
-- `--model`: Path to MLIP model file **(required)**. Can be a local path or a Hugging Face URI (e.g., `hf://your-org/your-repo` or `hf://your-org/your-repo:model.pt`). When using the `hf://` scheme, files are automatically downloaded and cached. The model format should match your installed backend (FAIRChem `.pt` files or MACE `.model` files).
+- `--model`: Path to MLIP model file **(required)**. Can be a local path or a Hugging Face URI (e.g., `hf://your-org/your-repo` or `hf://your-org/your-repo:model.pt`). When using the `hf://` scheme, files are automatically downloaded and cached. The model format should match your installed backend (FAIRChem `.pt` files, MACE `.model` files, or metatomic TorchScript models exported by metatrain's `mtt export`; a sibling `extensions/` directory is picked up automatically).
+- `--backend`: MLIP backend to use: `fairchem`, `mace-torch`, `orb-models`, or `metatomic`. Default: auto-detect from installed packages (tried in that order). Set explicitly when several backends are installed in the same environment — e.g. `--backend metatomic` to run a metatrain model in an image that also ships MACE.
 - `--output-dir`: Output directory (default: results)
 - `--write-trajectory`: Specifies to write out simulation trajectory every `--trajectory-interval` steps (default: False)
 - `--trajectory-interval`: Interval for saving structures into trajectory file (default: 100)

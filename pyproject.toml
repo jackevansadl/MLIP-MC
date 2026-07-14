@@ -27,6 +27,7 @@ dev = ["pytest"]
 fairchem = ["fairchem-core"]
 mace-torch = ["mace-torch"]
 orb-models = ["orb-models"]
+metatomic = ["metatomic-torch"]
 
 [project.scripts]
 mlip_mc = "mlip_mc.cli:main"

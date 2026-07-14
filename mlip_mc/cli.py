@@ -113,7 +113,14 @@ Examples:
     parser.add_argument('--n-trials', type=int, default=10000,
                         help='Number of Widom insertion trials (default: 10000)')
     parser.add_argument('--model', type=str, required=True,
-                        help='Path to MLIP model file (required). Can be a local path or Hugging Face URI (e.g., hf://your-org/your-repo).')
+                        help='Path to MLIP model file (required). Can be a local path or Hugging Face URI (e.g., hf://your-org/your-repo). '
+                             'For metatomic, pass the TorchScript model exported by metatrain (mtt export).')
+    parser.add_argument('--backend', type=str, default=None,
+                        choices=['fairchem', 'mace-torch', 'orb-models', 'metatomic'],
+                        help='MLIP backend to use. Default: auto-detect from installed packages '
+                             '(in the order fairchem, mace-torch, orb-models, metatomic). Set explicitly '
+                             'when several backends are installed, e.g. --backend metatomic to run a '
+                             'metatrain model in an image that also ships MACE.')
     parser.add_argument('--hf-token', type=str, default=None,
                         help='Hugging Face authentication token (optional, uses cached token if available)')
     parser.add_argument('--output-dir', type=str, default='results',
@@ -204,6 +211,7 @@ def main() -> None:
                 hf_token=args.hf_token,
                 gpu_id=gpu_id,
                 orb_model_variant=args.orb_variant,
+                backend=args.backend,
             )
         elif args.mode == 'widom':
             # Widom insertion mode
@@ -221,6 +229,7 @@ def main() -> None:
                 hf_token=args.hf_token,
                 gpu_id=gpu_id,
                 orb_model_variant=args.orb_variant,
+                backend=args.backend,
             )
         else:
             # GCMC mode
@@ -252,6 +261,7 @@ def main() -> None:
                 trajectory_interval=args.trajectory_interval,
                 overwrite_checkpoints=args.overwrite_checkpoints,
                 orb_model_variant=args.orb_variant,
+                backend=args.backend,
             )
     except Exception as e:
         print(f"\nERROR: {e}", file=sys.stderr)

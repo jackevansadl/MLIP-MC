@@ -301,7 +301,8 @@ def _detect_backend() -> str:
     Returns
     -------
     str
-        'fairchem', 'mace-torch', or 'orb-models', raises ImportError if none is available
+        'fairchem', 'mace-torch', 'orb-models', or 'metatomic',
+        raises ImportError if none is available
     """
     try:
         import fairchem.core
@@ -321,12 +322,19 @@ def _detect_backend() -> str:
         return 'orb-models'
     except ImportError:
         pass
-    
+
+    try:
+        import metatomic.torch  # noqa: F401
+        return 'metatomic'
+    except ImportError:
+        pass
+
     raise ImportError(
         "No MLIP backend found. Please install one of:\n"
         "  pip install mlip-mc[fairchem]\n"
         "  pip install mlip-mc[mace-torch]\n"
-        "  pip install mlip-mc[orb-models]"
+        "  pip install mlip-mc[orb-models]\n"
+        "  pip install mlip-mc[metatomic]"
     )
 
 
@@ -339,10 +347,13 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None, orb
     model_path : str
         Path to the model file (local path or HuggingFace repo).
         For ORB models, this should be the path to the weights checkpoint file.
+        For metatomic, this is the TorchScript model exported by metatrain
+        (``mtt export``, typically ``model.pt``).
     device : str
         Device to use ('cuda' or 'cpu')
     backend : str, optional
-        Backend to use ('fairchem', 'mace-torch', or 'orb-models'). If None, auto-detects.
+        Backend to use ('fairchem', 'mace-torch', 'orb-models', or
+        'metatomic'). If None, auto-detects.
     orb_model_variant : str, optional
         ORB model variant to use: 'omat' for orb_v3_conservative_inf_omat (default)
         or 'omol' for orb_v3_conservative_omol (requires charge=0, spin=1).
@@ -408,6 +419,31 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None, orb
         calc = ORBCalculator(orbff, device=device)
         return calc
 
+    elif backend == 'metatomic':
+        from metatomic.torch.ase_calculator import MetatomicCalculator
+
+        if model_path is None or not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"Metatomic model file not found at {model_path}\n"
+                "Provide the TorchScript model exported by metatrain "
+                "(`mtt export`, typically model.pt)."
+            )
+
+        # metatrain exports place TorchScript extensions (when the
+        # architecture needs them) in an `extensions/` directory next to
+        # the model file; pass it along automatically when present.
+        extensions_directory = None
+        candidate = Path(model_path).parent / 'extensions'
+        if candidate.is_dir():
+            extensions_directory = str(candidate)
+
+        calc = MetatomicCalculator(
+            model_path,
+            extensions_directory=extensions_directory,
+            device=device,
+        )
+        return calc
+
     elif backend == 'lammps-classical':
         import json
         from .src.lammps_backend import build_lammps_calculator
@@ -461,6 +497,7 @@ def run_single_pressure(
     trajectory_interval: int = 100,
     overwrite_checkpoints: bool = False,
     orb_model_variant: str = 'omat',
+    backend: Optional[str] = None,
 ) -> None:
     """
     Run GCMC simulation for a single pressure point on a specific GPU.
@@ -517,8 +554,9 @@ def run_single_pressure(
         else:
             device = 'cpu'
         
-        # 4. Detect backend and load model
-        backend = _detect_backend()
+        # 4. Detect backend (unless explicitly selected) and load model
+        if backend is None:
+            backend = _detect_backend()
         device_str = _format_device_str(gpu_id)
         print(f"  [{device_str}] Using backend: {backend}")
         model = _load_model(model_path, device=device, backend=backend, orb_model_variant=orb_model_variant)
@@ -691,6 +729,7 @@ def run_gcmc(
     trajectory_interval: int = 100,
     overwrite_checkpoints: bool = False,
     orb_model_variant: str = 'omat',
+    backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run GCMC isotherm simulation for gas adsorption in a porous material.
@@ -761,10 +800,11 @@ def run_gcmc(
         n_gpus = 0
         _print_warning("No GPUs available, using CPU")
 
-    # Detect backend once in the parent process so we can make backend-aware
-    # decisions about how to interpret model paths (e.g., which defaults or
-    # Hugging Face models are applicable).
-    backend = _detect_backend()
+    # Detect backend once in the parent process (unless explicitly selected)
+    # so we can make backend-aware decisions about how to interpret model
+    # paths (e.g., which defaults or Hugging Face models are applicable).
+    if backend is None:
+        backend = _detect_backend()
 
     model_path, hf_repo_id, hf_model_filename, is_hf = _resolve_model_spec(model_path)
 
@@ -901,7 +941,7 @@ def run_gcmc(
             n_equilibration_steps, n_production_steps, n_total_steps,
             gpu_id, result_queue, adsorbate_name, output_dir, checkpoint_interval,
             write_trajectory, trajectory_interval, overwrite_checkpoints,
-            orb_model_variant,
+            orb_model_variant, backend,
         ))
         p.start()
         active_processes.append(p)
@@ -985,6 +1025,7 @@ def run_widom(
     hf_token: Optional[str] = None,
     gpu_id: Union[int, str] = 0,
     orb_model_variant: str = 'omat',
+    backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run Widom insertion calculation for estimating Henry's constants and adsorption energies.
@@ -1044,8 +1085,9 @@ def run_widom(
         n_gpus = 0
         _print_warning("No GPUs available, using CPU")
     
-    # Detect backend
-    backend = _detect_backend()
+    # Detect backend (unless explicitly selected)
+    if backend is None:
+        backend = _detect_backend()
     
     model_path, hf_repo_id, hf_model_filename, is_hf = _resolve_model_spec(model_path)
     
@@ -1233,6 +1275,7 @@ def run_tmmc(
     hf_token: Optional[str] = None,
     gpu_id: Union[int, str] = 0,
     orb_model_variant: str = 'omat',
+    backend: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run a Transition-Matrix Monte Carlo simulation and compute the full
@@ -1313,7 +1356,8 @@ def run_tmmc(
         n_gpus = 0
         _print_warning("No GPUs available, using CPU")
 
-    backend = _detect_backend()
+    if backend is None:
+        backend = _detect_backend()
 
     model_path, hf_repo_id, hf_model_filename, is_hf = _resolve_model_spec(model_path)
 
