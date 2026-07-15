@@ -18,11 +18,11 @@ from .src.tmmc_analysis import (
     mean_N,
     compute_isotherm,
 )
-from .main import run_gcmc, run_widom, run_tmmc
+from .main import run_gcmc, run_widom, run_tmmc, patch_metatomic_for_rocm
 
 __all__ = [
     'MLP_GCMC', 'MLP_Widom', 'MLP_Gibbs', 'MLP_TMMC', 'PREOS',
-    'run_gcmc', 'run_widom', 'run_tmmc',
+    'run_gcmc', 'run_widom', 'run_tmmc', 'patch_metatomic_for_rocm',
     'read_binary_log', 'read_widom_binary_log', 'read_gibbs_binary_log',
     'lnPi_from_collection', 'reweight_lnPi', 'mean_N', 'compute_isotherm',
 ]

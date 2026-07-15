@@ -96,6 +96,62 @@ class TestLoadModelMetatomic:
         assert isinstance(calc, FakeMetatomicCalculator)
 
 
+class FakeSystem:
+    """Duck-typed metatomic System with a torch-like device attribute."""
+
+    def __init__(self, device):
+        self.device = types.SimpleNamespace(type=device) if isinstance(device, str) else device
+        self._device_str = device if isinstance(device, str) else device.type
+
+    def to(self, device):
+        return FakeSystem(device)
+
+
+class TestPatchMetatomicForRocm:
+
+    def _make_calc(self):
+        seen = {}
+
+        class FakeNL:
+            def compute(self, systems):
+                seen['devices'] = [s._device_str for s in systems]
+                return systems
+
+        calc = types.SimpleNamespace(_nl_calculators=FakeNL())
+        return calc, seen
+
+    def test_noop_without_hip(self, monkeypatch):
+        import torch
+        from mlip_mc.main import patch_metatomic_for_rocm
+        monkeypatch.setattr(torch.version, 'hip', None, raising=False)
+        calc, _ = self._make_calc()
+        assert patch_metatomic_for_rocm(calc) is calc
+        # The patch installs an instance-level override; without HIP the
+        # class method must remain untouched
+        assert 'compute' not in vars(calc._nl_calculators)
+
+    def test_hip_computes_nl_on_cpu_and_moves_back(self, monkeypatch):
+        import torch
+        from mlip_mc.main import patch_metatomic_for_rocm
+        monkeypatch.setattr(torch.version, 'hip', '6.3.42', raising=False)
+        calc, seen = self._make_calc()
+        patch_metatomic_for_rocm(calc)
+
+        out = calc._nl_calculators.compute([FakeSystem('cuda'), FakeSystem('cuda')])
+        # vesin must only ever see CPU systems...
+        assert seen['devices'] == ['cpu', 'cpu']
+        # ...and the results must come back on the original device
+        assert [s._device_str for s in out] == ['cuda', 'cuda']
+
+    def test_hip_missing_internals_warns_but_returns(self, monkeypatch, capsys):
+        import torch
+        from mlip_mc.main import patch_metatomic_for_rocm
+        monkeypatch.setattr(torch.version, 'hip', '6.3.42', raising=False)
+        calc = types.SimpleNamespace()  # no _nl_calculators
+        assert patch_metatomic_for_rocm(calc) is calc
+        assert 'could not patch' in capsys.readouterr().err
+
+
 class TestBackendCLI:
 
     def _parse(self, monkeypatch, extra):

@@ -338,6 +338,66 @@ def _detect_backend() -> str:
     )
 
 
+def patch_metatomic_for_rocm(calc: Any) -> Any:
+    """
+    Make a MetatomicCalculator work on AMD GPUs (ROCm/HIP torch builds).
+
+    vesin, the neighbor-list library used by metatomic's ASE calculator,
+    has CUDA kernels but no HIP support. ROCm torch reports HIP tensors
+    with device type "cuda", so vesin takes its CUDA code path and fails
+    with "Failed to load libcuda.so" on AMD nodes. This wraps the
+    calculator's neighbor-list computation to run on CPU and move the
+    result back to the GPU — the same fallback metatomic_ase itself uses
+    for other non-CPU devices — while the model still evaluates on the
+    GPU. Neighbor lists are a negligible fraction of an MLIP energy
+    evaluation, so the overhead is minor.
+
+    No-op on CUDA/CPU torch builds, so it is always safe to call:
+
+    >>> calc = MetatomicCalculator("model.pt", device="cuda")
+    >>> calc = patch_metatomic_for_rocm(calc)
+
+    Applied automatically by the `metatomic` backend of `_load_model`.
+
+    Parameters
+    ----------
+    calc : MetatomicCalculator
+        The calculator to patch.
+
+    Returns
+    -------
+    MetatomicCalculator
+        The same calculator, patched in place when running on ROCm.
+    """
+    import torch
+
+    if torch.version.hip is None:
+        return calc
+
+    nl_calculators = getattr(calc, '_nl_calculators', None)
+    if nl_calculators is None:
+        print(
+            "WARNING: could not patch metatomic neighbor lists for ROCm "
+            "(no _nl_calculators attribute; the metatomic-ase internals may "
+            "have changed). If you hit 'Failed to load libcuda.so', check "
+            "whether your metatomic version has native ROCm support.",
+            file=sys.stderr,
+        )
+        return calc
+
+    original_compute = nl_calculators.compute
+
+    def _compute_nl_on_cpu(systems):
+        devices = [system.device for system in systems]
+        cpu_systems = [system.to(device='cpu') for system in systems]
+        computed = original_compute(cpu_systems)
+        return [system.to(device=device)
+                for system, device in zip(computed, devices)]
+
+    nl_calculators.compute = _compute_nl_on_cpu
+    return calc
+
+
 def _load_model(model_path: str, device: str, backend: Optional[str] = None, orb_model_variant: str = 'omat') -> Any:
     """
     Load an MLIP model using the appropriate backend.
@@ -442,7 +502,7 @@ def _load_model(model_path: str, device: str, backend: Optional[str] = None, orb
             extensions_directory=extensions_directory,
             device=device,
         )
-        return calc
+        return patch_metatomic_for_rocm(calc)
 
     elif backend == 'lammps-classical':
         import json
